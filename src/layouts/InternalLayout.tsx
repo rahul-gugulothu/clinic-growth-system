@@ -12,6 +12,7 @@ import {
   Stethoscope,
   Sparkles,
   Search,
+  Menu,
 } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import { useStore } from '@/store';
@@ -36,6 +37,7 @@ export default function InternalLayout() {
   const session = useStore((s) => s.session);
   const logout = useStore((s) => s.logout);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
 
   const onLogout = () => {
     logout();
@@ -53,9 +55,35 @@ export default function InternalLayout() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
+  useEffect(() => {
+    document.body.style.overflow = mobileOpen ? 'hidden' : '';
+  }, [mobileOpen]);
+
   return (
-    <div className="flex min-h-screen bg-muted/30">
-      <aside className="hidden w-64 shrink-0 border-r bg-background md:flex md:flex-col">
+    <div className="flex min-h-screen bg-muted/30 overflow-x-hidden">
+      <header className="md:hidden fixed top-0 left-0 right-0 h-16 border-b bg-background z-30 flex items-center justify-between px-4">
+        <Button variant="ghost" size="icon" onClick={() => setMobileOpen(true)} aria-label="Open menu">
+          <Menu className="h-5 w-5" />
+        </Button>
+        <div className="flex items-center gap-2">
+          <Stethoscope className="h-5 w-5 text-primary" />
+          <span className="text-sm font-semibold">Clinic Growth</span>
+        </div>
+      </header>
+
+      {mobileOpen && (
+        <div className="fixed inset-0 z-40 bg-black/50 md:hidden" onClick={() => setMobileOpen(false)} />
+      )}
+
+      <aside
+        className={cn(
+          'w-64 shrink-0 border-r bg-background flex flex-col',
+          'fixed inset-y-0 left-0 z-50 -translate-x-full',
+          'transition-transform duration-300 ease-in-out',
+          'md:static md:z-auto md:translate-x-0',
+          mobileOpen && 'translate-x-0',
+        )}
+      >
         <div className="flex h-16 items-center gap-2 border-b px-4">
           <Stethoscope className="h-5 w-5 text-primary" />
           <div className="flex-1">
@@ -74,6 +102,7 @@ export default function InternalLayout() {
               <Link
                 key={item.to}
                 to={item.to}
+                onClick={() => setMobileOpen(false)}
                 className={cn(
                   'flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors',
                   active
@@ -105,7 +134,7 @@ export default function InternalLayout() {
           </div>
         </div>
       </aside>
-      <main className="flex-1 overflow-x-hidden">
+      <main className="flex-1 overflow-x-hidden pt-16 md:pt-0">
         <Outlet />
       </main>
       <CommandPalette open={searchOpen} onOpenChange={setSearchOpen} currentWorkspace={session.currentWorkspace} />
