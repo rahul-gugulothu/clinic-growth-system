@@ -1,13 +1,19 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
-import { BadRequestError, NotFoundError } from '../src/types/index.js';
+import request from 'supertest';
+import { BadRequestError, NotFoundError, ForbiddenError } from '../src/types/index.js';
+import type { AuthContext } from '../src/types/index.js';
 import { createTestDatabase, type TestDatabase } from './helpers.js';
 import { setPool } from '../src/db/index.js';
+import { createApp } from '../src/app.js';
+import { signAccessToken } from '../src/utils/jwt.js';
 import {
   listTools,
   getTool,
   executeTool,
   getExecutionResult,
+  approveExecution,
+  rejectExecution,
 } from '../src/services/aiTools.js';
 
 const DEV_ORG_ID = '00000000-0000-0000-0000-000000000001';
@@ -24,9 +30,35 @@ const ORG_B_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const PROSPECT_B_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee01';
 const AUDIT_B_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee02';
 
+const founderAuth: AuthContext = {
+  userId: DEV_FOUNDER_ID,
+  organizationId: DEV_ORG_ID,
+  role: 'founder',
+  clinicId: null,
+};
+
+const clinicOwnerAuth: AuthContext = {
+  userId: DEV_CLINIC_OWNER_ID,
+  organizationId: DEV_ORG_ID,
+  role: 'clinic_owner',
+  clinicId: DEV_CLINIC_ID,
+};
+
+const userBAuth: AuthContext = {
+  userId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee03',
+  organizationId: ORG_B_ID,
+  role: 'founder',
+  clinicId: null,
+};
+
+const founderToken = signAccessToken(founderAuth);
+const clinicOwnerToken = signAccessToken(clinicOwnerAuth);
+const userBToken = signAccessToken(userBAuth);
+
 describe('V3.1.0-B AI Tools', () => {
   let tdb: TestDatabase;
   let memPool: Pool;
+  const app = createApp();
 
   beforeAll(async () => {
     tdb = createTestDatabase();
@@ -150,7 +182,8 @@ describe('V3.1.0-B AI Tools', () => {
     await memPool.end();
   });
 
-  const query = (sql: string) => tdb.public.query(sql);
+  const query = (sql: string, params?: unknown[]) =>
+    params ? memPool.query(sql, params) : memPool.query(sql);
 
   // ==================================================================
   // A. REGISTRY
@@ -611,13 +644,14 @@ describe('V3.1.0-B AI Tools', () => {
       }
 
       // Query for the failed execution row
-      const result = query(
-        "SELECT * FROM ai_tool_executions WHERE tool_id = 'audit-summary' AND organization_id = '" +
-          DEV_ORG_ID +
-          "' AND status = 'failed' ORDER BY created_at DESC LIMIT 1"
+      const result = await query(
+        `SELECT * FROM ai_tool_executions
+         WHERE tool_id = $1 AND organization_id = $2 AND status = $3
+         ORDER BY created_at DESC LIMIT 1`,
+        ['audit-summary', DEV_ORG_ID, 'failed']
       );
 
-      expect(result.rowCount).toBe(1);
+      expect(result.rows.length).toBe(1);
       const row = result.rows[0];
       expect(row.status).toBe('failed');
       expect(row.success).toBe(false);
@@ -1189,11 +1223,13 @@ describe('V3.1.0-B AI Tools', () => {
         { prospectId: DEV_PROSPECT_ID }
       );
 
-      expect(result.status).toBe('completed');
+      expect(result.status).toBe('requires_approval');
       expect(result.requires_human_review).toBe(true);
       expect(result.data).toBeDefined();
       expect(result.duration_ms).toBeGreaterThanOrEqual(0);
       expect(result.completed_at).not.toBeNull();
+      expect(result.approved_by).toBeNull();
+      expect(result.approved_at).toBeNull();
     });
 
     it('draft-whatsapp returns structured data', async () => {
@@ -1228,7 +1264,7 @@ describe('V3.1.0-B AI Tools', () => {
 
       const record = await getExecutionResult(result.id, DEV_ORG_ID);
       expect(record).not.toBeNull();
-      expect(record!.status).toBe('completed');
+      expect(record!.status).toBe('requires_approval');
       expect(record!.success).toBe(true);
       expect(record!.requires_human_review).toBe(true);
       expect(record!.result_output).not.toBeNull();
@@ -1274,10 +1310,12 @@ describe('V3.1.0-B AI Tools', () => {
         { prospectId: DEV_PROSPECT_ID }
       );
 
-      expect(result.status).toBe('completed');
+      expect(result.status).toBe('requires_approval');
       expect(result.requires_human_review).toBe(true);
       expect(result.data).toBeDefined();
       expect(result.completed_at).not.toBeNull();
+      expect(result.approved_by).toBeNull();
+      expect(result.approved_at).toBeNull();
     });
 
     it('draft-email returns structured data', async () => {
@@ -1312,7 +1350,7 @@ describe('V3.1.0-B AI Tools', () => {
 
       const record = await getExecutionResult(result.id, DEV_ORG_ID);
       expect(record).not.toBeNull();
-      expect(record!.status).toBe('completed');
+      expect(record!.status).toBe('requires_approval');
       expect(record!.requires_human_review).toBe(true);
       expect(record!.result_output).not.toBeNull();
       expect(record!.result_output!.channel).toBe('Email');
@@ -1345,10 +1383,12 @@ describe('V3.1.0-B AI Tools', () => {
         { prospectId: DEV_PROSPECT_ID }
       );
 
-      expect(result.status).toBe('completed');
+      expect(result.status).toBe('requires_approval');
       expect(result.requires_human_review).toBe(true);
       expect(result.data).toBeDefined();
       expect(result.completed_at).not.toBeNull();
+      expect(result.approved_by).toBeNull();
+      expect(result.approved_at).toBeNull();
     });
 
     it('generate-proposal returns structured data', async () => {
@@ -1389,7 +1429,7 @@ describe('V3.1.0-B AI Tools', () => {
 
       const record = await getExecutionResult(result.id, DEV_ORG_ID);
       expect(record).not.toBeNull();
-      expect(record!.status).toBe('completed');
+      expect(record!.status).toBe('requires_approval');
       expect(record!.requires_human_review).toBe(true);
       expect(record!.result_output).not.toBeNull();
       expect(record!.result_output!.clinic).toBe('Kaya Skin Clinic');
@@ -1480,6 +1520,423 @@ describe('V3.1.0-B AI Tools', () => {
       expect(record).not.toBeNull();
       expect(record!.result_output).not.toBeNull();
       expect(record!.result_output!.scope).toBeDefined();
+    });
+  });
+
+  // ==================================================================
+  // Q. APPROVAL WORKFLOW (V3.1.1)
+  // ==================================================================
+
+  describe('Q. Approval Workflow', () => {
+    let actionExecutionId: string;
+    let readOnlyExecutionId: string;
+
+    beforeAll(async () => {
+      const actionResult = await executeTool(
+        'draft-whatsapp',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+      actionExecutionId = actionResult.id;
+
+      const readOnlyResult = await executeTool(
+        'priority-clinics',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        {}
+      );
+      readOnlyExecutionId = readOnlyResult.id;
+    });
+
+    it('Q.1 requires_approval execution status for action tool', () => {
+      expect(actionExecutionId).toBeDefined();
+      // Verified by status assertions in section M
+    });
+
+    it('Q.13 executeTool action tool sets status = requires_approval', async () => {
+      const result = await executeTool(
+        'draft-email',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+      expect(result.status).toBe('requires_approval');
+      expect(result.requires_human_review).toBe(true);
+      expect(result.approved_by).toBeNull();
+      expect(result.approved_at).toBeNull();
+    });
+
+    it('Q.14 executeTool read-only tool sets status = completed', async () => {
+      const result = await executeTool(
+        'priority-clinics',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        {}
+      );
+      expect(result.status).toBe('completed');
+      expect(result.requires_human_review).toBe(false);
+    });
+
+    it('Q.16 approved_by / approved_at not populated during initial execution', async () => {
+      const result = await executeTool(
+        'generate-proposal',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+      expect(result.approved_by).toBeNull();
+      expect(result.approved_at).toBeNull();
+    });
+
+    it('Q.1 valid approval: requires_approval → approved', async () => {
+      const execution = await approveExecution({
+        executionId: actionExecutionId,
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        userRole: 'founder',
+        clinicId: null,
+      });
+
+      expect(execution.status).toBe('approved');
+      expect(execution.approved_by).toBe(DEV_FOUNDER_ID);
+      expect(execution.approved_at).not.toBeNull();
+    });
+
+    it('Q.6 already approved: second approve → BadRequestError', async () => {
+      await expect(
+        approveExecution({
+          executionId: actionExecutionId,
+          organizationId: DEV_ORG_ID,
+          userId: DEV_FOUNDER_ID,
+          userRole: 'founder',
+          clinicId: null,
+        })
+      ).rejects.toThrow(BadRequestError);
+    });
+
+    it('Q.2 valid rejection: requires_approval → rejected', async () => {
+      const result = await executeTool(
+        'draft-whatsapp',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const execution = await rejectExecution({
+        executionId: result.id,
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        userRole: 'founder',
+        reason: 'Client not interested in WhatsApp outreach',
+        clinicId: null,
+      });
+
+      expect(execution.status).toBe('rejected');
+    });
+
+    it('Q.7 already rejected: approve rejected execution → BadRequestError', async () => {
+      const result = await executeTool(
+        'draft-whatsapp',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      await rejectExecution({
+        executionId: result.id,
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        userRole: 'founder',
+        reason: 'Initial rejection',
+        clinicId: null,
+      });
+
+      await expect(
+        approveExecution({
+          executionId: result.id,
+          organizationId: DEV_ORG_ID,
+          userId: DEV_FOUNDER_ID,
+          userRole: 'founder',
+          clinicId: null,
+        })
+      ).rejects.toThrow(BadRequestError);
+    });
+
+    it('Q.3 clinic-scoped user cannot approve', async () => {
+      await expect(
+        approveExecution({
+          executionId: actionExecutionId,
+          organizationId: DEV_ORG_ID,
+          userId: DEV_CLINIC_OWNER_ID,
+          userRole: 'clinic_owner',
+          clinicId: DEV_CLINIC_ID,
+        })
+      ).rejects.toThrow(ForbiddenError);
+    });
+
+    it('Q.4 cross-org isolation: cannot approve another org execution', async () => {
+      await expect(
+        approveExecution({
+          executionId: actionExecutionId,
+          organizationId: ORG_B_ID,
+          userId: DEV_FOUNDER_ID,
+          userRole: 'founder',
+          clinicId: null,
+        })
+      ).rejects.toThrow(ForbiddenError);
+    });
+
+    it('Q.5 completed non-reviewable execution → BadRequestError', async () => {
+      await expect(
+        approveExecution({
+          executionId: readOnlyExecutionId,
+          organizationId: DEV_ORG_ID,
+          userId: DEV_FOUNDER_ID,
+          userRole: 'founder',
+          clinicId: null,
+        })
+      ).rejects.toThrow(BadRequestError);
+    });
+
+    it('Q.8 failed execution cannot be approved', async () => {
+      try {
+        await executeTool(
+          'draft-whatsapp',
+          DEV_ORG_ID,
+          DEV_FOUNDER_ID,
+          null,
+          { prospectId: INVALID_UUID }
+        );
+      } catch {
+        // expected - tool execution fails with NotFoundError
+      }
+
+      const failedRows = await query(
+        `SELECT id FROM ai_tool_executions
+         WHERE tool_id = $1 AND status = $2 AND organization_id = $3
+         ORDER BY created_at DESC LIMIT 1`,
+        ['draft-whatsapp', 'failed', DEV_ORG_ID]
+      );
+      expect(failedRows.rows.length).toBe(1);
+
+      await expect(
+        approveExecution({
+          executionId: failedRows.rows[0].id,
+          organizationId: DEV_ORG_ID,
+          userId: DEV_FOUNDER_ID,
+          userRole: 'founder',
+          clinicId: null,
+        })
+      ).rejects.toThrow(BadRequestError);
+    });
+
+    it('Q.9 approval audit event created', async () => {
+      const execResult = await executeTool(
+        'draft-whatsapp',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      await approveExecution({
+        executionId: execResult.id,
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        userRole: 'founder',
+        clinicId: null,
+      });
+
+      const auditRows = await query(
+        `SELECT * FROM audit_log
+         WHERE entity = $1
+           AND entity_id = $2
+           AND action = $3
+         ORDER BY created_at DESC`,
+        ['ai_tool_execution', execResult.id, 'ai_execution_approved']
+      );
+      expect(auditRows.rows.length).toBe(1);
+      expect(auditRows.rows[0].new_values).toMatchObject({
+        status: 'approved',
+        approved_by: DEV_FOUNDER_ID,
+      });
+    });
+
+    it('Q.10 rejection audit event created', async () => {
+      const execResult = await executeTool(
+        'draft-email',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      await rejectExecution({
+        executionId: execResult.id,
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        userRole: 'founder',
+        reason: 'Not a good fit for the clinic',
+        clinicId: null,
+      });
+
+      const auditRows = await query(
+        `SELECT * FROM audit_log
+         WHERE entity = $1
+           AND entity_id = $2
+           AND action = $3
+         ORDER BY created_at DESC`,
+        ['ai_tool_execution', execResult.id, 'ai_execution_rejected']
+      );
+      expect(auditRows.rows.length).toBe(1);
+      expect(auditRows.rows[0].new_values).toMatchObject({
+        status: 'rejected',
+        reason: 'Not a good fit for the clinic',
+      });
+    });
+
+    it('Q.11 repeated approval is idempotent (only one succeeds)', async () => {
+      const execResult = await executeTool(
+        'generate-proposal',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const first = await approveExecution({
+        executionId: execResult.id,
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        userRole: 'founder',
+        clinicId: null,
+      });
+
+      expect(first.status).toBe('approved');
+
+      await expect(
+        approveExecution({
+          executionId: execResult.id,
+          organizationId: DEV_ORG_ID,
+          userId: DEV_FOUNDER_ID,
+          userRole: 'founder',
+          clinicId: null,
+        })
+      ).rejects.toThrow(BadRequestError);
+
+      const record = await getExecutionResult(execResult.id, DEV_ORG_ID);
+      expect(record!.status).toBe('approved');
+    });
+
+    it('Q.12 rejection reason persists in audit event', async () => {
+      const execResult = await executeTool(
+        'draft-whatsapp',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      await rejectExecution({
+        executionId: execResult.id,
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        userRole: 'founder',
+        reason: 'Prospect already has WhatsApp automation',
+        clinicId: null,
+      });
+
+      const auditRows = await query(
+        `SELECT * FROM audit_log
+         WHERE entity = $1
+           AND entity_id = $2
+           AND action = $3
+         ORDER BY created_at DESC`,
+        ['ai_tool_execution', execResult.id, 'ai_execution_rejected']
+      );
+      expect(auditRows.rows[0].new_values).toMatchObject({
+        status: 'rejected',
+        reason: 'Prospect already has WhatsApp automation',
+      });
+    });
+
+    it('Q.15 GET execution organization isolation', async () => {
+      const result = await request(app)
+        .get(`/api/v1/ai/${actionExecutionId}`)
+        .set('Authorization', `Bearer ${userBToken}`);
+
+      expect(result.status).toBe(404);
+    });
+
+    it('Q.17 approve route requires authentication', async () => {
+      const result = await request(app)
+        .post(`/api/v1/ai/${readOnlyExecutionId}/approve`)
+        .send();
+
+      expect(result.status).toBe(401);
+    });
+
+    it('Q.18 approve route rejects clinic-scoped roles', async () => {
+      const result = await request(app)
+        .post(`/api/v1/ai/${readOnlyExecutionId}/approve`)
+        .set('Authorization', `Bearer ${clinicOwnerToken}`);
+
+      expect(result.status).toBe(403);
+    });
+
+    it('Q.R1 valid approval via route', async () => {
+      const execResult = await executeTool(
+        'draft-whatsapp',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const result = await request(app)
+        .post(`/api/v1/ai/${execResult.id}/approve`)
+        .set('Authorization', `Bearer ${founderToken}`);
+
+      expect(result.status).toBe(200);
+      expect(result.body.execution.status).toBe('approved');
+      expect(result.body.execution.approved_by).toBe(DEV_FOUNDER_ID);
+      expect(result.body.execution.approved_at).not.toBeNull();
+    });
+
+    it('Q.R2 valid rejection via route', async () => {
+      const execResult = await executeTool(
+        'draft-email',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const result = await request(app)
+        .post(`/api/v1/ai/${execResult.id}/reject`)
+        .set('Authorization', `Bearer ${founderToken}`)
+        .send({ reason: 'Client feedback negative' });
+
+      expect(result.status).toBe(200);
+      expect(result.body.execution.status).toBe('rejected');
+    });
+
+    it('Q.R3 GET execution detail via route', async () => {
+      const result = await request(app)
+        .get(`/api/v1/ai/${readOnlyExecutionId}`)
+        .set('Authorization', `Bearer ${founderToken}`);
+
+      expect(result.status).toBe(200);
+      expect(result.body.execution.id).toBe(readOnlyExecutionId);
+      expect(result.body.execution.organization_id).toBe(DEV_ORG_ID);
     });
   });
 });

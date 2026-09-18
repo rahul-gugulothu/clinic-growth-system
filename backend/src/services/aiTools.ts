@@ -3,8 +3,11 @@ import { getClient } from '../db/index.js';
 import {
   BadRequestError,
   NotFoundError,
+  ForbiddenError,
   InternalServerError,
+  type UserRole,
 } from '../types/index.js';
+import { logAuditEvent } from './audit.js';
 import { logger } from '../utils/logger.js';
 import type {
   AiToolDefinition,
@@ -224,17 +227,21 @@ export const executeTool = async (
       const durationMs = Date.now() - startTime;
       const completedAt = new Date().toISOString();
 
-      // 7. Move to 'completed'
+      // 7. Move to completed or requires_approval
+      const newStatus: AiExecutionStatus = tool.human_review_required
+        ? 'requires_approval'
+        : 'completed';
+
       await client.query(
         `UPDATE ai_tool_executions
-           SET status = 'completed',
-               completed_at = $1,
-               duration_ms = $2,
+           SET status = $1,
+               completed_at = $2,
+               duration_ms = $3,
                success = TRUE,
-               result_output = $3,
+               result_output = $4,
                error = NULL
-         WHERE id = $4`,
-        [completedAt, durationMs, JSON.stringify(resultData), executionId]
+         WHERE id = $5`,
+        [newStatus, completedAt, durationMs, JSON.stringify(resultData), executionId]
       );
 
       // 8. Return the structured result
@@ -242,7 +249,7 @@ export const executeTool = async (
         id: executionId,
         organization_id: organizationId,
         tool_id: toolId,
-        status: 'completed' as AiExecutionStatus,
+        status: newStatus,
         data: resultData,
         requires_human_review: tool.human_review_required,
         duration_ms: durationMs,
@@ -277,6 +284,209 @@ export const executeTool = async (
       if (err instanceof NotFoundError) throw err;
       throw new InternalServerError(`Tool '${toolId}' execution failed: ${errorMsg}`);
     }
+  } finally {
+    client.release();
+  }
+};
+
+// ==================================================================
+// V3.1.1 — HUMAN APPROVAL WORKFLOW
+// ==================================================================
+
+export interface ApproveExecutionParams {
+  executionId: string;
+  organizationId: string;
+  userId: string;
+  userRole: UserRole;
+  clinicId: string | null;
+}
+
+export interface RejectExecutionParams {
+  executionId: string;
+  organizationId: string;
+  userId: string;
+  userRole: UserRole;
+  reason: string;
+  clinicId: string | null;
+}
+
+const ALLOWED_APPROVER_ROLES: UserRole[] = ['founder', 'org_admin'];
+
+const AI_EXECUTION_TRANSITIONS: Record<AiExecutionStatus, AiExecutionStatus[]> = {
+  requested: [],
+  running: [],
+  completed: [],
+  failed: [],
+  requires_approval: ['approved', 'rejected'],
+  approved: [],
+  rejected: [],
+};
+
+const validateExecutionTransition = (
+  current: AiExecutionStatus,
+  target: AiExecutionStatus
+): void => {
+  if (!AI_EXECUTION_TRANSITIONS[current]?.includes(target)) {
+    throw new BadRequestError(
+      `Cannot transition execution from '${current}' to '${target}'`
+    );
+  }
+};
+
+const enforceApproverRole = (role: UserRole): void => {
+  if (!ALLOWED_APPROVER_ROLES.includes(role)) {
+    throw new ForbiddenError(
+      'Only organization-level users can approve AI executions'
+    );
+  }
+};
+
+export const approveExecution = async (
+  params: ApproveExecutionParams
+): Promise<AiToolExecutionRecord> => {
+  enforceApproverRole(params.userRole);
+
+  const client = await getClient();
+  const approvedAt = new Date().toISOString();
+
+  try {
+    const updateResult = await client.query<AiToolExecutionRecord>(
+      `UPDATE ai_tool_executions
+         SET status = 'approved',
+             approved_by = $1,
+             approved_at = $2
+       WHERE id = $3
+         AND organization_id = $4
+         AND status = 'requires_approval'
+         AND requires_human_review = true
+       RETURNING *`,
+      [params.userId, approvedAt, params.executionId, params.organizationId]
+    );
+
+    if (updateResult.rowCount === 0) {
+      const checkResult = await client.query<{
+        status: AiExecutionStatus;
+        organization_id: string;
+        requires_human_review: boolean;
+      }>(
+        `SELECT status, organization_id, requires_human_review
+         FROM ai_tool_executions
+         WHERE id = $1`,
+        [params.executionId]
+      );
+
+      if (checkResult.rowCount === 0) {
+        throw new NotFoundError('Execution not found');
+      }
+
+      const record = checkResult.rows[0];
+
+      if (record.organization_id !== params.organizationId) {
+        throw new ForbiddenError('Access denied to this execution');
+      }
+
+      validateExecutionTransition(record.status, 'approved');
+
+      if (!record.requires_human_review) {
+        throw new BadRequestError('This execution does not require human review');
+      }
+
+      throw new BadRequestError(
+        `Cannot approve execution in status: ${record.status}`
+      );
+    }
+
+    const record = updateResult.rows[0];
+
+    await logAuditEvent({
+      organizationId: params.organizationId,
+      userId: params.userId,
+      clinicId: params.clinicId,
+      action: 'ai_execution_approved',
+      entity: 'ai_tool_execution',
+      entityId: params.executionId,
+      oldValues: { status: 'requires_approval' },
+      newValues: {
+        status: 'approved',
+        approved_by: params.userId,
+      },
+    });
+
+    return record;
+  } finally {
+    client.release();
+  }
+};
+
+export const rejectExecution = async (
+  params: RejectExecutionParams
+): Promise<AiToolExecutionRecord> => {
+  enforceApproverRole(params.userRole);
+
+  const client = await getClient();
+
+  try {
+    const updateResult = await client.query<AiToolExecutionRecord>(
+      `UPDATE ai_tool_executions
+         SET status = 'rejected'
+       WHERE id = $1
+         AND organization_id = $2
+         AND status = 'requires_approval'
+         AND requires_human_review = true
+       RETURNING *`,
+      [params.executionId, params.organizationId]
+    );
+
+    if (updateResult.rowCount === 0) {
+      const checkResult = await client.query<{
+        status: AiExecutionStatus;
+        organization_id: string;
+        requires_human_review: boolean;
+      }>(
+        `SELECT status, organization_id, requires_human_review
+         FROM ai_tool_executions
+         WHERE id = $1`,
+        [params.executionId]
+      );
+
+      if (checkResult.rowCount === 0) {
+        throw new NotFoundError('Execution not found');
+      }
+
+      const record = checkResult.rows[0];
+
+      if (record.organization_id !== params.organizationId) {
+        throw new ForbiddenError('Access denied to this execution');
+      }
+
+      validateExecutionTransition(record.status, 'rejected');
+
+      if (!record.requires_human_review) {
+        throw new BadRequestError('This execution does not require human review');
+      }
+
+      throw new BadRequestError(
+        `Cannot reject execution in status: ${record.status}`
+      );
+    }
+
+    const record = updateResult.rows[0];
+
+    await logAuditEvent({
+      organizationId: params.organizationId,
+      userId: params.userId,
+      clinicId: params.clinicId,
+      action: 'ai_execution_rejected',
+      entity: 'ai_tool_execution',
+      entityId: params.executionId,
+      oldValues: { status: 'requires_approval' },
+      newValues: {
+        status: 'rejected',
+        reason: params.reason,
+      },
+    });
+
+    return record;
   } finally {
     client.release();
   }

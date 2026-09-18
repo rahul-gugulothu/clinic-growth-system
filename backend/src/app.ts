@@ -18,6 +18,7 @@ import reviewRouter from './routes/reviews.js';
 import businessOutcomeRouter from './routes/businessOutcomes.js';
 import referralRouter from './routes/referrals.js';
 import messageRouter from './routes/messages.js';
+import aiToolsRouter from './routes/aiTools.js';
 import { config } from './config/index.js';
 
 export const createApp = (): Express => {
@@ -57,6 +58,7 @@ export const createApp = (): Express => {
   app.use('/api/v1/referrals', referralRouter);
   app.use('/api/v1', doctorRouter);
   app.use('/api/v1', staffRouter);
+  app.use('/api/v1/ai', aiToolsRouter);
 
   app.use(errorHandler);
 
