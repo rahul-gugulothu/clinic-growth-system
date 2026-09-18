@@ -1,3 +1,5 @@
+import type { z } from 'zod';
+
 export type AiExecutionStatus =
   | 'requested'
   | 'running'
@@ -9,7 +11,15 @@ export type AiExecutionStatus =
 
 export type AiToolTenantScope = 'org' | 'clinic' | 'mixed';
 
+export interface AiToolExecutionContext {
+  organizationId: string;
+  userId: string | null;
+  clinicId: string | null;
+}
+
 export interface AiToolContext {
+  prospectId?: string;
+  auditId?: string;
   [key: string]: unknown;
 }
 
@@ -25,6 +35,11 @@ export interface AiToolDefinition {
   tenant_scope: AiToolTenantScope;
   required_context: string[];
   human_review_required: boolean;
+  context_schema: z.ZodType;
+  execute(
+    execContext: AiToolExecutionContext,
+    toolContext: AiToolContext
+  ): Promise<unknown>;
 }
 
 export interface AiToolExecutionRecord {

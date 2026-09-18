@@ -5,7 +5,6 @@ dist-ssr
 .DS_Store
 *.local
 .env*.local
-backend
 backend/node_modules
 tsconfig.tsbuildinfo
 vite.config.ts.timestamp-*.mjs
