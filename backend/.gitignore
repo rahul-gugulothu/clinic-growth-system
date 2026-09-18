@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment
+.env
+
+# Logs
+logs/
+*.log
+
+# Test artifacts
+coverage/
+
+# IDE
+.vscode/
+.idea/
+
+# Temp files
+test-pgmem.*
