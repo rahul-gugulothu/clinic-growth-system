@@ -22,6 +22,9 @@ import { callPreparationTool } from './aiTools/callPreparation.js';
 import { weeklyReportTool } from './aiTools/weeklyReport.js';
 import { workPlannerTool } from './aiTools/workPlanner.js';
 import { growthOpportunitiesTool } from './aiTools/growthOpportunities.js';
+import { draftWhatsAppTool } from './aiTools/draftWhatsApp.js';
+import { draftEmailTool } from './aiTools/draftEmail.js';
+import { generateProposalTool } from './aiTools/generateProposal.js';
 
 export const TOOL_REGISTRY: AiToolDefinition[] = [
   priorityClinicsTool,
@@ -32,6 +35,9 @@ export const TOOL_REGISTRY: AiToolDefinition[] = [
   weeklyReportTool,
   workPlannerTool,
   growthOpportunitiesTool,
+  draftWhatsAppTool,
+  draftEmailTool,
+  generateProposalTool,
 ];
 
 export const TOOL_BY_ID: Record<string, AiToolDefinition> =
@@ -188,7 +194,7 @@ export const executeTool = async (
     }>(
       `INSERT INTO ai_tool_executions
          (organization_id, user_id, clinic_id, tool_id, context, status, started_at, requires_human_review, success)
-       VALUES ($1, $2, $3, $4, $5, 'requested', $6, FALSE, FALSE)
+       VALUES ($1, $2, $3, $4, $5, 'requested', $6, $7, FALSE)
        RETURNING id, created_at`,
       [
         organizationId,
@@ -197,6 +203,7 @@ export const executeTool = async (
         toolId,
         JSON.stringify(toolContext),
         startedAt,
+        tool.human_review_required,
       ]
     );
 
@@ -237,7 +244,7 @@ export const executeTool = async (
         tool_id: toolId,
         status: 'completed' as AiExecutionStatus,
         data: resultData,
-        requires_human_review: false,
+        requires_human_review: tool.human_review_required,
         duration_ms: durationMs,
         created_at: createdAt,
         completed_at: completedAt,

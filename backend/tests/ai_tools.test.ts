@@ -157,9 +157,9 @@ describe('V3.1.0-B AI Tools', () => {
   // ==================================================================
 
   describe('A. Registry', () => {
-    it('registry contains exactly 8 tools', () => {
+    it('registry contains exactly 11 tools', () => {
       const tools = listTools();
-      expect(tools).toHaveLength(8);
+      expect(tools).toHaveLength(11);
     });
 
     it('tools have correct IDs', () => {
@@ -168,6 +168,9 @@ describe('V3.1.0-B AI Tools', () => {
       expect(ids).toEqual([
         'audit-summary',
         'call-preparation',
+        'draft-email',
+        'draft-whatsapp',
+        'generate-proposal',
         'growth-opportunities',
         'pipeline-diagnosis',
         'priority-clinics',
@@ -177,10 +180,18 @@ describe('V3.1.0-B AI Tools', () => {
       ]);
     });
 
-    it('all tools have human_review_required = false', () => {
-      const tools = listTools();
+    it('non-action tools have human_review_required = false', () => {
+      const tools = listTools().filter((t) => !['draft-whatsapp', 'draft-email', 'generate-proposal'].includes(t.id));
       for (const tool of tools) {
         expect(tool.human_review_required).toBe(false);
+      }
+    });
+
+    it('action tools have human_review_required = true', () => {
+      const actionTools = listTools().filter((t) => ['draft-whatsapp', 'draft-email', 'generate-proposal'].includes(t.id));
+      expect(actionTools).toHaveLength(3);
+      for (const tool of actionTools) {
+        expect(tool.human_review_required).toBe(true);
       }
     });
 
@@ -260,6 +271,54 @@ describe('V3.1.0-B AI Tools', () => {
     it('weekly-report is org-scoped', () => {
       const tool = getTool('weekly-report');
       expect(tool).toBeDefined();
+      expect(tool!.tenant_scope).toBe('org');
+    });
+
+    it('draft-whatsapp requires prospectId', () => {
+      const tool = getTool('draft-whatsapp');
+      expect(tool).toBeDefined();
+      expect(tool!.required_context).toContain('prospectId');
+    });
+
+    it('draft-email requires prospectId', () => {
+      const tool = getTool('draft-email');
+      expect(tool).toBeDefined();
+      expect(tool!.required_context).toContain('prospectId');
+    });
+
+    it('generate-proposal requires prospectId', () => {
+      const tool = getTool('generate-proposal');
+      expect(tool).toBeDefined();
+      expect(tool!.required_context).toContain('prospectId');
+    });
+
+    it('draft-whatsapp has human_review_required = true', () => {
+      const tool = getTool('draft-whatsapp');
+      expect(tool!.human_review_required).toBe(true);
+    });
+
+    it('draft-email has human_review_required = true', () => {
+      const tool = getTool('draft-email');
+      expect(tool!.human_review_required).toBe(true);
+    });
+
+    it('generate-proposal has human_review_required = true', () => {
+      const tool = getTool('generate-proposal');
+      expect(tool!.human_review_required).toBe(true);
+    });
+
+    it('draft-whatsapp is org-scoped', () => {
+      const tool = getTool('draft-whatsapp');
+      expect(tool!.tenant_scope).toBe('org');
+    });
+
+    it('draft-email is org-scoped', () => {
+      const tool = getTool('draft-email');
+      expect(tool!.tenant_scope).toBe('org');
+    });
+
+    it('generate-proposal is org-scoped', () => {
+      const tool = getTool('generate-proposal');
       expect(tool!.tenant_scope).toBe('org');
     });
   });
@@ -1115,4 +1174,312 @@ describe('V3.1.0-B AI Tools', () => {
     });
   });
 
+
+  // ==================================================================
+  // M. DRAFT-WHATSAPP
+  // ==================================================================
+
+  describe('M. Draft WhatsApp', () => {
+    it('draft-whatsapp succeeds with valid prospectId', async () => {
+      const result = await executeTool(
+        'draft-whatsapp',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      expect(result.status).toBe('completed');
+      expect(result.requires_human_review).toBe(true);
+      expect(result.data).toBeDefined();
+      expect(result.duration_ms).toBeGreaterThanOrEqual(0);
+      expect(result.completed_at).not.toBeNull();
+    });
+
+    it('draft-whatsapp returns structured data', async () => {
+      const result = await executeTool(
+        'draft-whatsapp',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const data = result.data as {
+        channel: string;
+        recipient: string;
+        draftText: string;
+        reasoning: string;
+      };
+      expect(data.channel).toBe('WhatsApp');
+      expect(data.recipient).toContain('Kaya Skin Clinic');
+      expect(data.draftText).toBeDefined();
+      expect(data.reasoning).toBeDefined();
+    });
+
+    it('draft-whatsapp execution row has requires_human_review = true', async () => {
+      const result = await executeTool(
+        'draft-whatsapp',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const record = await getExecutionResult(result.id, DEV_ORG_ID);
+      expect(record).not.toBeNull();
+      expect(record!.status).toBe('completed');
+      expect(record!.success).toBe(true);
+      expect(record!.requires_human_review).toBe(true);
+      expect(record!.result_output).not.toBeNull();
+      expect(record!.result_output!.channel).toBe('WhatsApp');
+    });
+
+    it('draft-whatsapp cross-org returns NotFoundError', async () => {
+      await expect(
+        executeTool(
+          'draft-whatsapp',
+          ORG_B_ID,
+          DEV_FOUNDER_ID,
+          null,
+          { prospectId: DEV_PROSPECT_ID }
+        )
+      ).rejects.toThrow(NotFoundError);
+    });
+
+    it('draft-whatsapp missing prospectId rejected', async () => {
+      await expect(
+        executeTool(
+          'draft-whatsapp',
+          DEV_ORG_ID,
+          DEV_FOUNDER_ID,
+          null,
+          {}
+        )
+      ).rejects.toThrow(BadRequestError);
+    });
+  });
+
+  // ==================================================================
+  // N. DRAFT-EMAIL
+  // ==================================================================
+
+  describe('N. Draft Email', () => {
+    it('draft-email succeeds with valid prospectId', async () => {
+      const result = await executeTool(
+        'draft-email',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      expect(result.status).toBe('completed');
+      expect(result.requires_human_review).toBe(true);
+      expect(result.data).toBeDefined();
+      expect(result.completed_at).not.toBeNull();
+    });
+
+    it('draft-email returns structured data', async () => {
+      const result = await executeTool(
+        'draft-email',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const data = result.data as {
+        channel: string;
+        recipient: string;
+        draftText: string;
+        reasoning: string;
+      };
+      expect(data.channel).toBe('Email');
+      expect(data.recipient).toContain('Kaya Skin Clinic');
+      expect(data.draftText).toContain('Subject:');
+      expect(data.reasoning).toBeDefined();
+    });
+
+    it('draft-email execution row has requires_human_review = true', async () => {
+      const result = await executeTool(
+        'draft-email',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const record = await getExecutionResult(result.id, DEV_ORG_ID);
+      expect(record).not.toBeNull();
+      expect(record!.status).toBe('completed');
+      expect(record!.requires_human_review).toBe(true);
+      expect(record!.result_output).not.toBeNull();
+      expect(record!.result_output!.channel).toBe('Email');
+    });
+
+    it('draft-email cross-org returns NotFoundError', async () => {
+      await expect(
+        executeTool(
+          'draft-email',
+          ORG_B_ID,
+          DEV_FOUNDER_ID,
+          null,
+          { prospectId: DEV_PROSPECT_ID }
+        )
+      ).rejects.toThrow(NotFoundError);
+    });
+  });
+
+  // ==================================================================
+  // O. GENERATE-PROPOSAL
+  // ==================================================================
+
+  describe('O. Generate Proposal', () => {
+    it('generate-proposal succeeds with valid prospectId', async () => {
+      const result = await executeTool(
+        'generate-proposal',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      expect(result.status).toBe('completed');
+      expect(result.requires_human_review).toBe(true);
+      expect(result.data).toBeDefined();
+      expect(result.completed_at).not.toBeNull();
+    });
+
+    it('generate-proposal returns structured data', async () => {
+      const result = await executeTool(
+        'generate-proposal',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const data = result.data as {
+        clinic: string;
+        scope: string;
+        expectedOutcomes: string;
+        timeline: string;
+        price?: number;
+        assumptions: string[];
+        nextStep: string;
+      };
+      expect(data.clinic).toBe('Kaya Skin Clinic');
+      expect(data.scope).toBeDefined();
+      expect(data.expectedOutcomes).toBeDefined();
+      expect(data.timeline).toBeDefined();
+      expect(data.assumptions).toBeInstanceOf(Array);
+      expect(data.assumptions.length).toBeGreaterThan(0);
+      expect(data.nextStep).toBeDefined();
+    });
+
+    it('generate-proposal execution row has requires_human_review = true', async () => {
+      const result = await executeTool(
+        'generate-proposal',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const record = await getExecutionResult(result.id, DEV_ORG_ID);
+      expect(record).not.toBeNull();
+      expect(record!.status).toBe('completed');
+      expect(record!.requires_human_review).toBe(true);
+      expect(record!.result_output).not.toBeNull();
+      expect(record!.result_output!.clinic).toBe('Kaya Skin Clinic');
+    });
+
+    it('generate-proposal cross-org returns NotFoundError', async () => {
+      await expect(
+        executeTool(
+          'generate-proposal',
+          ORG_B_ID,
+          DEV_FOUNDER_ID,
+          null,
+          { prospectId: DEV_PROSPECT_ID }
+        )
+      ).rejects.toThrow(NotFoundError);
+    });
+
+    it('generate-proposal missing prospectId rejected', async () => {
+      await expect(
+        executeTool(
+          'generate-proposal',
+          DEV_ORG_ID,
+          DEV_FOUNDER_ID,
+          null,
+          {}
+        )
+      ).rejects.toThrow(BadRequestError);
+    });
+  });
+
+  // ==================================================================
+  // P. ACTION TOOL EXECUTION PROPERTIES
+  // ==================================================================
+
+  describe('P. Action Tool Execution Properties', () => {
+    it('all action tools have requires_human_review = true', async () => {
+      for (const toolId of [
+        'draft-whatsapp',
+        'draft-email',
+        'generate-proposal',
+      ]) {
+        const tool = getTool(toolId);
+        expect(tool).toBeDefined();
+        expect(tool!.human_review_required).toBe(true);
+      }
+    });
+
+    it('draft-whatsapp result persists to result_output', async () => {
+      const result = await executeTool(
+        'draft-whatsapp',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const record = await getExecutionResult(result.id, DEV_ORG_ID);
+      expect(record).not.toBeNull();
+      expect(record!.result_output).not.toBeNull();
+      expect(record!.result_output!.draftText).toBeDefined();
+    });
+
+    it('draft-email result persists to result_output', async () => {
+      const result = await executeTool(
+        'draft-email',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const record = await getExecutionResult(result.id, DEV_ORG_ID);
+      expect(record).not.toBeNull();
+      expect(record!.result_output).not.toBeNull();
+      expect(record!.result_output!.channel).toBe('Email');
+    });
+
+    it('generate-proposal result persists to result_output', async () => {
+      const result = await executeTool(
+        'generate-proposal',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const record = await getExecutionResult(result.id, DEV_ORG_ID);
+      expect(record).not.toBeNull();
+      expect(record!.result_output).not.toBeNull();
+      expect(record!.result_output!.scope).toBeDefined();
+    });
+  });
 });
