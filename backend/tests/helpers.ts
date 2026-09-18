@@ -8,7 +8,11 @@ import { DataType } from 'pg-mem';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = join(__dirname, '..', 'migrations');
 
-export const MIGRATION_FILES = ['00001_initial_schema.sql', '00002_seed_dev_data.sql'] as const;
+export const MIGRATION_FILES = [
+  '00001_initial_schema.sql',
+  '00002_seed_dev_data.sql',
+  '00003_v310_ai_execution_foundation.sql',
+] as const;
 
 export interface TestDatabase {
   db: IMemoryDb;
