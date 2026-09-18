@@ -19,6 +19,7 @@ import businessOutcomeRouter from './routes/businessOutcomes.js';
 import referralRouter from './routes/referrals.js';
 import messageRouter from './routes/messages.js';
 import aiToolsRouter from './routes/aiTools.js';
+import integrationsRouter from './routes/integrations.js';
 import { config } from './config/index.js';
 
 export const createApp = (): Express => {
@@ -59,6 +60,7 @@ export const createApp = (): Express => {
   app.use('/api/v1', doctorRouter);
   app.use('/api/v1', staffRouter);
   app.use('/api/v1/ai', aiToolsRouter);
+  app.use('/api/v1/integrations', integrationsRouter);
 
   app.use(errorHandler);
 
