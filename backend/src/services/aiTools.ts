@@ -18,12 +18,20 @@ import { priorityClinicsTool } from './aiTools/priorityClinics.js';
 import { prospectSummaryTool } from './aiTools/prospectSummary.js';
 import { pipelineDiagnosisTool } from './aiTools/pipelineDiagnosis.js';
 import { auditSummaryTool } from './aiTools/auditSummary.js';
+import { callPreparationTool } from './aiTools/callPreparation.js';
+import { weeklyReportTool } from './aiTools/weeklyReport.js';
+import { workPlannerTool } from './aiTools/workPlanner.js';
+import { growthOpportunitiesTool } from './aiTools/growthOpportunities.js';
 
 export const TOOL_REGISTRY: AiToolDefinition[] = [
   priorityClinicsTool,
   prospectSummaryTool,
   pipelineDiagnosisTool,
   auditSummaryTool,
+  callPreparationTool,
+  weeklyReportTool,
+  workPlannerTool,
+  growthOpportunitiesTool,
 ];
 
 export const TOOL_BY_ID: Record<string, AiToolDefinition> =

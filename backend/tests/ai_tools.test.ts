@@ -157,9 +157,9 @@ describe('V3.1.0-B AI Tools', () => {
   // ==================================================================
 
   describe('A. Registry', () => {
-    it('registry contains exactly 4 tools', () => {
+    it('registry contains exactly 8 tools', () => {
       const tools = listTools();
-      expect(tools).toHaveLength(4);
+      expect(tools).toHaveLength(8);
     });
 
     it('tools have correct IDs', () => {
@@ -167,9 +167,13 @@ describe('V3.1.0-B AI Tools', () => {
       const ids = tools.map((t) => t.id).sort();
       expect(ids).toEqual([
         'audit-summary',
+        'call-preparation',
+        'growth-opportunities',
         'pipeline-diagnosis',
         'priority-clinics',
         'prospect-summary',
+        'weekly-report',
+        'work-planner',
       ]);
     });
 
@@ -183,7 +187,7 @@ describe('V3.1.0-B AI Tools', () => {
     it('all tools have correct tenant scope', () => {
       const tools = listTools();
       for (const tool of tools) {
-        expect(tool.tenant_scope).toBe('org');
+        expect(['org', 'clinic', 'mixed']).toContain(tool.tenant_scope);
       }
     });
 
@@ -209,6 +213,54 @@ describe('V3.1.0-B AI Tools', () => {
       const tool = getTool('audit-summary');
       expect(tool).toBeDefined();
       expect(tool!.required_context).toContain('auditId');
+    });
+
+    it('call-preparation requires prospectId', () => {
+      const tool = getTool('call-preparation');
+      expect(tool).toBeDefined();
+      expect(tool!.required_context).toContain('prospectId');
+    });
+
+    it('work-planner has no required context', () => {
+      const tool = getTool('work-planner');
+      expect(tool).toBeDefined();
+      expect(tool!.required_context).toEqual([]);
+    });
+
+    it('weekly-report has no required context', () => {
+      const tool = getTool('weekly-report');
+      expect(tool).toBeDefined();
+      expect(tool!.required_context).toEqual([]);
+    });
+
+    it('growth-opportunities has no required context', () => {
+      const tool = getTool('growth-opportunities');
+      expect(tool).toBeDefined();
+      expect(tool!.required_context).toEqual([]);
+    });
+
+    it('work-planner is clinic-scoped', () => {
+      const tool = getTool('work-planner');
+      expect(tool).toBeDefined();
+      expect(tool!.tenant_scope).toBe('clinic');
+    });
+
+    it('growth-opportunities is clinic-scoped', () => {
+      const tool = getTool('growth-opportunities');
+      expect(tool).toBeDefined();
+      expect(tool!.tenant_scope).toBe('clinic');
+    });
+
+    it('call-preparation is org-scoped', () => {
+      const tool = getTool('call-preparation');
+      expect(tool).toBeDefined();
+      expect(tool!.tenant_scope).toBe('org');
+    });
+
+    it('weekly-report is org-scoped', () => {
+      const tool = getTool('weekly-report');
+      expect(tool).toBeDefined();
+      expect(tool!.tenant_scope).toBe('org');
     });
   });
 
@@ -680,4 +732,387 @@ describe('V3.1.0-B AI Tools', () => {
       expect(record).toBeNull();
     });
   });
+  // ==================================================================
+  // H. CALL-PREPARATION
+  // ==================================================================
+
+  describe('H. Call Preparation', () => {
+    it('call-preparation executes successfully', async () => {
+      const result = await executeTool(
+        'call-preparation',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      expect(result.status).toBe('completed');
+      expect(result.requires_human_review).toBe(false);
+      expect(result.data).toBeDefined();
+      expect(result.duration_ms).toBeGreaterThanOrEqual(0);
+      expect(result.completed_at).not.toBeNull();
+    });
+
+    it('call-preparation returns structured data', async () => {
+      const result = await executeTool(
+        'call-preparation',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const data = result.data as {
+        objective: string;
+        clinicContext: string;
+        auditFindings: string[];
+        discussionPoints: string[];
+        questionsToAsk: string[];
+        suggestedNextStep: string;
+      };
+      expect(data.objective).toContain('Kaya Skin Clinic');
+      expect(data.clinicContext).toContain('Aesthetic Dermatology');
+      expect(data.auditFindings).toBeInstanceOf(Array);
+      expect(data.discussionPoints).toBeInstanceOf(Array);
+      expect(data.discussionPoints.length).toBeGreaterThan(0);
+      expect(data.questionsToAsk).toBeInstanceOf(Array);
+      expect(data.questionsToAsk.length).toBeGreaterThan(0);
+      expect(data.suggestedNextStep).toBeDefined();
+    });
+
+    it('call-preparation execution row completed', async () => {
+      const result = await executeTool(
+        'call-preparation',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const record = await getExecutionResult(result.id, DEV_ORG_ID);
+      expect(record).not.toBeNull();
+      expect(record!.status).toBe('completed');
+      expect(record!.success).toBe(true);
+      expect(record!.requires_human_review).toBe(false);
+      expect(record!.completed_at).toBeDefined();
+      expect(record!.duration_ms).toBeGreaterThanOrEqual(0);
+      expect(record!.result_output).not.toBeNull();
+    });
+
+    it('call-preparation cross-org returns NotFoundError', async () => {
+      await expect(
+        executeTool(
+          'call-preparation',
+          ORG_B_ID,
+          DEV_FOUNDER_ID,
+          null,
+          { prospectId: DEV_PROSPECT_ID }
+        )
+      ).rejects.toThrow(NotFoundError);
+    });
+  });
+  // ==================================================================
+  // I. WEEKLY-REPORT
+  // ==================================================================
+
+  describe('I. Weekly Report', () => {
+    it('weekly-report executes successfully', async () => {
+      const result = await executeTool(
+        'weekly-report',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        {}
+      );
+
+      expect(result.status).toBe('completed');
+      expect(result.requires_human_review).toBe(false);
+      expect(result.data).toBeDefined();
+      expect(result.duration_ms).toBeGreaterThanOrEqual(0);
+      expect(result.completed_at).not.toBeNull();
+    });
+
+    it('weekly-report returns structured data', async () => {
+      const result = await executeTool(
+        'weekly-report',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        {}
+      );
+
+      const data = result.data as {
+        generatedAt: string;
+        prospectsResearched: number;
+        auditsCompleted: number;
+        outreachRecords: number;
+        responsesReceived: number;
+        callsHad: number;
+        proposalsCreated: number;
+        wins: number;
+        pipelineValue: number;
+        recommendedFocus: string;
+        insufficientData: boolean;
+      };
+      expect(data.generatedAt).toBeDefined();
+      expect(data.prospectsResearched).toBeGreaterThanOrEqual(0);
+      expect(data.auditsCompleted).toBeGreaterThanOrEqual(0);
+      expect(data.outreachRecords).toBeGreaterThanOrEqual(0);
+      expect(data.responsesReceived).toBeGreaterThanOrEqual(0);
+      expect(data.callsHad).toBeGreaterThanOrEqual(0);
+      expect(data.proposalsCreated).toBeGreaterThanOrEqual(0);
+      expect(data.wins).toBeGreaterThanOrEqual(0);
+      expect(data.pipelineValue).toBeGreaterThanOrEqual(0);
+      expect(data.recommendedFocus).toBeDefined();
+      expect(data.insufficientData).toBe(false);
+    });
+
+    it('weekly-report persistence verified', async () => {
+      const result = await executeTool(
+        'weekly-report',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        {}
+      );
+
+      const record = await getExecutionResult(result.id, DEV_ORG_ID);
+      expect(record).not.toBeNull();
+      expect(record!.status).toBe('completed');
+      expect(record!.result_output).not.toBeNull();
+      expect(record!.result_output!.prospectsResearched).toBeDefined();
+    });
+
+    it('weekly-report org isolation', async () => {
+      const result = await executeTool(
+        'weekly-report',
+        ORG_B_ID,
+        DEV_FOUNDER_ID,
+        null,
+        {}
+      );
+
+      const data = result.data as {
+        insufficientData: boolean;
+        prospectsResearched: number;
+      };
+      expect(data.prospectsResearched).toBeGreaterThanOrEqual(0);
+      expect(result.organization_id).toBe(ORG_B_ID);
+    });
+  });
+  // ==================================================================
+  // J. WORK-PLANNER
+  // ==================================================================
+
+  describe('J. Work Planner', () => {
+    it('work-planner executes successfully for clinic-scoped user', async () => {
+      const result = await executeTool(
+        'work-planner',
+        DEV_ORG_ID,
+        DEV_CLINIC_OWNER_ID,
+        DEV_CLINIC_ID,
+        {}
+      );
+
+      expect(result.status).toBe('completed');
+      expect(result.requires_human_review).toBe(false);
+      expect(result.data).toBeDefined();
+    });
+
+    it('work-planner returns structured data', async () => {
+      const result = await executeTool(
+        'work-planner',
+        DEV_ORG_ID,
+        DEV_CLINIC_OWNER_ID,
+        DEV_CLINIC_ID,
+        {}
+      );
+
+      const data = result.data as {
+        doNow: Array<{ task: string; reason: string }>;
+        doToday: Array<{ task: string; reason: string }>;
+        optional: Array<{ task: string; reason: string }>;
+      };
+      expect(data.doNow).toBeInstanceOf(Array);
+      expect(data.doToday).toBeInstanceOf(Array);
+      expect(data.optional).toBeInstanceOf(Array);
+    });
+
+    it('work-planner founder access (clinicId=null) succeeds', async () => {
+      const result = await executeTool(
+        'work-planner',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        {}
+      );
+
+      expect(result.status).toBe('completed');
+      expect(result.data).toBeDefined();
+    });
+
+    it('work-planner clinic isolation', async () => {
+      const result = await executeTool(
+        'work-planner',
+        DEV_ORG_ID,
+        DEV_CLINIC_OWNER_ID,
+        DEV_CLINIC_ID,
+        {}
+      );
+
+      const record = await getExecutionResult(result.id, DEV_ORG_ID);
+      expect(record).not.toBeNull();
+      expect(record!.clinic_id).toBe(DEV_CLINIC_ID);
+    });
+
+    it('work-planner cross-org denied', async () => {
+      await expect(
+        executeTool(
+          'work-planner',
+          ORG_B_ID,
+          DEV_CLINIC_OWNER_ID,
+          DEV_CLINIC_ID,
+          {}
+        )
+      ).rejects.toThrow(Error);
+    });
+  });
+  // ==================================================================
+  // K. GROWTH-OPPORTUNITIES
+  // ==================================================================
+
+  describe('K. Growth Opportunities', () => {
+    it('growth-opportunities executes successfully for clinic-scoped user', async () => {
+      const result = await executeTool(
+        'growth-opportunities',
+        DEV_ORG_ID,
+        DEV_CLINIC_OWNER_ID,
+        DEV_CLINIC_ID,
+        {}
+      );
+
+      expect(result.status).toBe('completed');
+      expect(result.requires_human_review).toBe(false);
+      expect(result.data).toBeDefined();
+    });
+
+    it('growth-opportunities returns structured data', async () => {
+      const result = await executeTool(
+        'growth-opportunities',
+        DEV_ORG_ID,
+        DEV_CLINIC_OWNER_ID,
+        DEV_CLINIC_ID,
+        {}
+      );
+
+      const data = result.data as {
+        opportunities: Array<{
+          opportunity: string;
+          evidence: string;
+          suggestedAction: string;
+          confidence: 'high' | 'medium' | 'low';
+        }>;
+      };
+      expect(data.opportunities).toBeInstanceOf(Array);
+      expect(data.opportunities.length).toBeGreaterThan(0);
+      for (const opp of data.opportunities) {
+        expect(opp).toHaveProperty('opportunity');
+        expect(opp).toHaveProperty('evidence');
+        expect(opp).toHaveProperty('suggestedAction');
+        expect(opp).toHaveProperty('confidence');
+        expect(['high', 'medium', 'low']).toContain(opp.confidence);
+      }
+    });
+
+    it('growth-opportunities founder access (clinicId=null) succeeds', async () => {
+      const result = await executeTool(
+        'growth-opportunities',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        {}
+      );
+
+      expect(result.status).toBe('completed');
+      const data = result.data as {
+        opportunities: Array<Record<string, unknown>>
+      };
+      expect(data.opportunities.length).toBeGreaterThan(0);
+    });
+
+    it('growth-opportunities clinic isolation', async () => {
+      const result = await executeTool(
+        'growth-opportunities',
+        DEV_ORG_ID,
+        DEV_CLINIC_OWNER_ID,
+        DEV_CLINIC_ID,
+        {}
+      );
+
+      const record = await getExecutionResult(result.id, DEV_ORG_ID);
+      expect(record).not.toBeNull();
+      expect(record!.clinic_id).toBe(DEV_CLINIC_ID);
+    });
+
+    it('growth-opportunities cross-org denied', async () => {
+      await expect(
+        executeTool(
+          'growth-opportunities',
+          ORG_B_ID,
+          DEV_CLINIC_OWNER_ID,
+          DEV_CLINIC_ID,
+          {}
+        )
+      ).rejects.toThrow(Error);
+    });
+  });
+  // ==================================================================
+  // L. EXECUTION PROPERTIES FOR NEW TOOLS
+  // ==================================================================
+
+  describe('L. Execution Properties for New Tools', () => {
+    it('all new tools have requires_human_review = false', async () => {
+      for (const toolId of [
+        'call-preparation',
+        'weekly-report',
+        'work-planner',
+        'growth-opportunities',
+      ]) {
+        const tool = getTool(toolId);
+        expect(tool).toBeDefined();
+        expect(tool!.human_review_required).toBe(false);
+      }
+    });
+
+    it('call-preparation execution persists result_output', async () => {
+      const result = await executeTool(
+        'call-preparation',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const record = await getExecutionResult(result.id, DEV_ORG_ID);
+      expect(record).not.toBeNull();
+      expect(record!.result_output).not.toBeNull();
+      expect(record!.result_output!.objective).toBeDefined();
+    });
+
+    it('weekly-report execution persists result_output', async () => {
+      const result = await executeTool(
+        'weekly-report',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        {}
+      );
+
+      const record = await getExecutionResult(result.id, DEV_ORG_ID);
+      expect(record).not.toBeNull();
+      expect(record!.result_output).not.toBeNull();
+      expect(record!.result_output!.recommendedFocus).toBeDefined();
+    });
+  });
+
 });
