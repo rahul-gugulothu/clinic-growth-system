@@ -9,6 +9,7 @@ import {
 import { logAuditEvent } from './audit.js';
 import { logger } from '../utils/logger.js';
 import { mockProvider } from './providers/mockProvider.js';
+import { sendEmailProvider } from './providers/emailProvider.js';
 import type {
   IntegrationEventRecord,
   IntegrationProvider,
@@ -25,6 +26,7 @@ import type { AiToolExecutionRecord } from '../types/aiTools.js';
 
 const PROVIDER_REGISTRY: Record<string, IntegrationProvider> = {
   mock: mockProvider,
+  sendgrid: sendEmailProvider,
 };
 
 export const getIntegrationProvider = (
