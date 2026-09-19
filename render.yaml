@@ -1,0 +1,80 @@
+# Render Blueprint for the Clinic Growth System backend.
+#
+# Two services share one backend/ build:
+#   1. `api`      — Express HTTP API (type: web)
+#   2. `integration-worker` — due-event processing worker (type: worker)
+#
+# The frontend is served separately via Vercel (see vercel.json) and is NOT
+# defined here. Per V3.1.3-B, the worker exposes no HTTP and must not be probed.
+#
+# Build output (tsconfig: outDir "dist", rootDir "."):
+#   dist/src/server.js
+#   dist/src/workers/integrationWorker.js
+
+# Secrets are managed in the Render Dashboard (sync: false) — never committed.
+# Both services reference this group, so a dashboard value applies to both.
+# NOTE: in NODE_ENV=production the API's config enforces JWT_SECRET and
+# JWT_REFRESH_SECRET at module load, so the worker must receive them too even
+# though it never uses JWT (the worker imports the shared config module).
+envVarGroups:
+  - name: backend-secrets
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_REFRESH_SECRET
+        sync: false
+      - key: INTEGRATION_ENCRYPTION_KEY
+        sync: false
+
+services:
+  # ---- API web service ----
+  - type: web
+    name: api
+    runtime: node
+    rootDir: backend
+    plan: starter
+    numInstances: 1
+    buildCommand: npm ci && npm run build
+    preDeployCommand: npm run migrate:up
+    startCommand: node dist/src/server.js
+    # Existing API health endpoint; returns 200 (healthy) or 503 (degraded).
+    healthCheckPath: /api/v1/health
+    maxShutdownDelaySeconds: 60
+    envVars:
+      - fromGroup: backend-secrets
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      # Set to the Vercel frontend origin in the Render Dashboard.
+      - key: CORS_ORIGIN
+        sync: false
+
+  # ---- Integration worker (background worker) ----
+  # Exactly ONE instance. processIntegrationEvent() guards against
+  # double-send via row locks + status-gated UPDATE, but there is no
+  # distributed leader-election: a second instance could mark due events
+  # as `failed` (counted) instead of processing them. Keep a single replica.
+  - type: worker
+    name: integration-worker
+    runtime: node
+    rootDir: backend
+    plan: starter
+    numInstances: 1
+    buildCommand: npm ci && npm run build
+    preDeployCommand: npm run migrate:up
+    startCommand: node dist/src/workers/integrationWorker.js
+    maxShutdownDelaySeconds: 120
+    autoDeploy: true
+    envVars:
+      - fromGroup: backend-secrets
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      - key: INTEGRATION_WORKER_INTERVAL_MS
+        value: "30000"
+      - key: INTEGRATION_WORKER_BATCH_SIZE
+        value: "50"
