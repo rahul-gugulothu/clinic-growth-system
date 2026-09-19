@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { getClient } from '../../db/index.js';
-import { NotFoundError } from '../../types/index.js';
+import { BadRequestError, NotFoundError } from '../../types/index.js';
 import { logger } from '../../utils/logger.js';
 import type {
   AiToolDefinition,
@@ -19,6 +19,10 @@ export interface DraftMessageResult {
   recipient: string;
   draftText: string;
   reasoning: string;
+  to: string;
+  subject: string;
+  body: string;
+  body_type: 'text' | 'html';
 }
 
 interface ProspectRow {
@@ -35,6 +39,7 @@ interface ProspectRow {
   review_count: number | null;
   content_quality: string | null;
   visible_advertising: string | null;
+  email: string | null;
 }
 
 interface AuditRow {
@@ -75,7 +80,7 @@ export const draftEmailTool: AiToolDefinition = {
       const prospectResult = await client.query<ProspectRow>(
         `SELECT id, organization_id, clinic_name, doctor_name, specialty, area,
                 website, booking_available, whatsapp_available, google_rating,
-                review_count, content_quality, visible_advertising
+                review_count, content_quality, visible_advertising, email
          FROM prospects
          WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL`,
         [prospectId, organizationId]
@@ -86,6 +91,12 @@ export const draftEmailTool: AiToolDefinition = {
       }
 
       const prospect = prospectResult.rows[0];
+
+      if (!prospect.email) {
+        throw new BadRequestError(
+          `Prospect ${prospect.id} has no email address; cannot draft email`
+        );
+      }
 
       const auditsResult = await client.query<AuditRow>(
         `SELECT identified_problems, recommendations, overall_opportunity
@@ -160,6 +171,10 @@ export const draftEmailTool: AiToolDefinition = {
         recipient: `${prospect.doctor_name} - ${prospect.clinic_name}`,
         draftText: `Subject: ${subject}\n\n${body}`,
         reasoning,
+        to: prospect.email,
+        subject,
+        body,
+        body_type: 'text',
       };
 
       return result;
@@ -169,6 +184,7 @@ export const draftEmailTool: AiToolDefinition = {
         'draft-email tool failed'
       );
       if (err instanceof NotFoundError) throw err;
+      if (err instanceof BadRequestError) throw err;
       throw new Error(`draft-email tool failed: ${(err as Error).message}`);
     } finally {
       client.release();

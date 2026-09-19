@@ -108,6 +108,20 @@ describe('Schema Validation', () => {
     }
   });
 
+  it('V3.1.2-C3-A: prospects.email column exists as nullable TEXT', () => {
+    expect(hasColumn('prospects', 'email'), 'prospects.email should exist').toBe(true);
+    expect(getColumnUdtName('prospects', 'email'), 'prospects.email should be TEXT').toBe('text');
+
+    // The seeded DEV_PROSPECT_ID row was inserted by migration 00002 before the
+    // email column existed, so its email must be NULL — proving the column is
+    // nullable. (pg-mem does not surface is_nullable reliably for ALTER TABLE ADD COLUMN.)
+    const row = tdb.public.query(
+      "SELECT email FROM prospects WHERE id = '00000000-0000-0000-0000-000000000010'"
+    );
+    expect(row.rowCount).toBe(1);
+    expect(row.rows[0].email).toBeNull();
+  });
+
   it('enum types are registered and used by table columns (verified via udt_name)', () => {
     // pg-mem does not expose pg_enum; verify via information_schema udt_name.
     const enumColumnChecks = [

@@ -13,6 +13,7 @@ export const MIGRATION_FILES = [
   '00002_seed_dev_data.sql',
   '00003_v310_ai_execution_foundation.sql',
   '00004_v312_integration_idempotency.sql',
+  '00005_v312_prospect_email.sql',
 ] as const;
 
 export interface TestDatabase {

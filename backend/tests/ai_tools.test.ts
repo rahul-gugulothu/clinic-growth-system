@@ -66,6 +66,15 @@ describe('V3.1.0-B AI Tools', () => {
     memPool = new pgLib.Pool();
     setPool(memPool);
 
+    // V3.1.2-C3-A: seed a routable email on the DEV_PROSPECT_ID prospect.
+    // The prospects.email column is nullable and not backfilled by 00002.
+    await tdb.public.none(`
+      UPDATE prospects
+      SET email = 'dr.anaya.kaya@example.com'
+      WHERE id = '${DEV_PROSPECT_ID}'
+        AND organization_id = '${DEV_ORG_ID}'
+    `);
+
     // Insert test audit for DEV_PROSPECT_ID
     await tdb.public.none(`
       INSERT INTO audits (
@@ -1357,6 +1366,152 @@ describe('V3.1.0-B AI Tools', () => {
     });
 
     it('draft-email cross-org returns NotFoundError', async () => {
+      await expect(
+        executeTool(
+          'draft-email',
+          ORG_B_ID,
+          DEV_FOUNDER_ID,
+          null,
+          { prospectId: DEV_PROSPECT_ID }
+        )
+      ).rejects.toThrow(NotFoundError);
+    });
+  });
+
+  // ==================================================================
+  // N2. DRAFT-EMAIL STRUCTURED OUTPUT (C3-A)
+  // ==================================================================
+
+  describe('N2. Draft Email Structured Output (C3-A)', () => {
+    it('C3-A.1 prospect with email produces `to`', async () => {
+      const result = await executeTool(
+        'draft-email',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const data = result.data as {
+        channel: string;
+        recipient: string;
+        draftText: string;
+        reasoning: string;
+        to: string;
+        subject: string;
+        body: string;
+        body_type: string;
+      };
+      expect(data.to).toBe('dr.anaya.kaya@example.com');
+    });
+
+    it('C3-A.2 subject is separately populated', async () => {
+      const result = await executeTool(
+        'draft-email',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const data = result.data as {
+        subject: string;
+        draftText: string;
+      };
+      expect(data.subject).toBe('Growth Opportunity for Kaya Skin Clinic');
+      expect(data.subject).not.toContain('\n');
+      expect(data.draftText).toContain(`Subject: ${data.subject}`);
+    });
+
+    it('C3-A.3 body is separately populated', async () => {
+      const result = await executeTool(
+        'draft-email',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const data = result.data as {
+        body: string;
+        draftText: string;
+      };
+      expect(data.body).toBeTruthy();
+      expect(data.body.startsWith('Subject:')).toBe(false);
+      expect(data.draftText).toContain(data.body);
+    });
+
+    it('C3-A.4 body_type is "text"', async () => {
+      const result = await executeTool(
+        'draft-email',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const data = result.data as { body_type: string };
+      expect(data.body_type).toBe('text');
+    });
+
+    it('C3-A.5 existing recipient remains present', async () => {
+      const result = await executeTool(
+        'draft-email',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const data = result.data as { recipient: string };
+      expect(data.recipient).toContain('Kaya Skin Clinic');
+    });
+
+    it('C3-A.6 existing draftText remains present', async () => {
+      const result = await executeTool(
+        'draft-email',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const data = result.data as { draftText: string };
+      expect(data.draftText).toContain('Subject:');
+      expect(data.draftText).toContain('Kaya Skin Clinic');
+    });
+
+    it('C3-A.7 prospect without email fails safely (BadRequestError)', async () => {
+      // PROSPECT_B_ID (Clinic B, Org B) is seeded without an email address.
+      await expect(
+        executeTool(
+          'draft-email',
+          ORG_B_ID,
+          DEV_FOUNDER_ID,
+          null,
+          { prospectId: PROSPECT_B_ID }
+        )
+      ).rejects.toThrow(BadRequestError);
+    });
+
+    it('C3-A.8 email belongs to the requested prospect', async () => {
+      const result = await executeTool(
+        'draft-email',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      const data = result.data as { to: string };
+      // `to` is read from prospects.email for THIS prospect, not a constant
+      // and never a users.email / staff.email address.
+      expect(data.to).toBe('dr.anaya.kaya@example.com');
+      expect(data.to).not.toBe('founder@cliniciogrowth.local');
+    });
+
+    it('C3-A.9 organization isolation remains enforced', async () => {
+      // Org B cannot see Org A's prospect.
       await expect(
         executeTool(
           'draft-email',
