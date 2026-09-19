@@ -5,7 +5,7 @@ import { setPool } from '../src/db/index.js';
 import { processDueIntegrationEvents } from '../src/services/integrations.js';
 import { setIntegrationConfig } from '../src/services/integrationConfigs.js';
 import { httpRequest } from '../src/utils/httpClient.js';
-import type { IntegrationEventRecord } from '../src/types/integrations.js';
+import type { IntegrationEventRecord, IntegrationBatchResult } from '../src/types/integrations.js';
 
 vi.mock('../src/utils/httpClient.js', async (importOriginal) => {
   const actual =
@@ -63,6 +63,73 @@ const seedSendgridConfig = async (): Promise<void> => {
     configKey: 'from_email',
     value: TEST_FROM_EMAIL,
   });
+};
+
+const mockBatchResult: IntegrationBatchResult = { processed: 1, succeeded: 1, retried: 0, failed: 0 };
+
+const loadWorker = async (
+  overrides: {
+    processDueIntegrationEvents?: ReturnType<typeof vi.fn>;
+    closePool?: ReturnType<typeof vi.fn>;
+    createPool?: ReturnType<typeof vi.fn>;
+  } = {}
+): Promise<typeof import('../src/workers/integrationWorker.js')> => {
+  const mockProcessDue =
+    overrides.processDueIntegrationEvents ??
+    vi.fn().mockResolvedValue(mockBatchResult);
+  const mockCreatePool = overrides.createPool ?? vi.fn();
+  const mockClosePool = overrides.closePool ?? vi.fn().mockResolvedValue(undefined);
+
+  vi.doMock('../src/services/integrations.js', () => ({
+    processDueIntegrationEvents: mockProcessDue,
+  }));
+  vi.doMock('../src/db/index.js', () => ({
+    createPool: mockCreatePool,
+    closePool: mockClosePool,
+    setPool: vi.fn(),
+    getPool: vi.fn(),
+    getClient: vi.fn(),
+  }));
+
+  return import('../src/workers/integrationWorker.js');
+};
+
+const mockLogger = {
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+  fatal: vi.fn(),
+};
+
+const loadWorkerWithMockLogger = async (
+  overrides: {
+    processDueIntegrationEvents?: ReturnType<typeof vi.fn>;
+    closePool?: ReturnType<typeof vi.fn>;
+    createPool?: ReturnType<typeof vi.fn>;
+  } = {}
+): Promise<typeof import('../src/workers/integrationWorker.js')> => {
+  const mockProcessDue =
+    overrides.processDueIntegrationEvents ??
+    vi.fn().mockResolvedValue(mockBatchResult);
+  const mockCreatePool = overrides.createPool ?? vi.fn();
+  const mockClosePool = overrides.closePool ?? vi.fn().mockResolvedValue(undefined);
+
+  vi.doMock('../src/services/integrations.js', () => ({
+    processDueIntegrationEvents: mockProcessDue,
+  }));
+  vi.doMock('../src/db/index.js', () => ({
+    createPool: mockCreatePool,
+    closePool: mockClosePool,
+    setPool: vi.fn(),
+    getPool: vi.fn(),
+    getClient: vi.fn(),
+  }));
+  vi.doMock('../src/utils/logger.js', () => ({
+    logger: mockLogger,
+  }));
+
+  return import('../src/workers/integrationWorker.js');
 };
 
 describe('V3.1.3-A Integration Worker', () => {
@@ -354,6 +421,9 @@ describe('V3.1.3-A Integration Worker', () => {
       vi.doMock('../src/db/index.js', () => ({
         createPool: mockCreatePool,
         closePool: mockClosePool,
+        setPool: vi.fn(),
+        getPool: vi.fn(),
+        getClient: vi.fn(),
       }));
 
       const worker = await import('../src/workers/integrationWorker.js');
@@ -368,7 +438,7 @@ describe('V3.1.3-A Integration Worker', () => {
     });
 
     it('A.14 shutdown waits for active cycle and prevents future cycles', async () => {
-      const cycle = deferred<void>();
+      const cycle = deferred<IntegrationBatchResult>();
       const mockProcessDue = vi.fn(() => cycle.promise);
       const mockCreatePool = vi.fn();
       const mockClosePool = vi.fn().mockResolvedValue(undefined);
@@ -379,6 +449,9 @@ describe('V3.1.3-A Integration Worker', () => {
       vi.doMock('../src/db/index.js', () => ({
         createPool: mockCreatePool,
         closePool: mockClosePool,
+        setPool: vi.fn(),
+        getPool: vi.fn(),
+        getClient: vi.fn(),
       }));
 
       const worker = await import('../src/workers/integrationWorker.js');
@@ -397,13 +470,233 @@ describe('V3.1.3-A Integration Worker', () => {
       await new Promise((r) => setTimeout(r, 30));
       expect(settled).toBe(false);
 
-      cycle.resolve();
-      await shutdownPromise;
+      cycle.resolve(mockBatchResult);
+      const result = await shutdownPromise;
 
       await new Promise((r) => setTimeout(r, 30));
       expect(mockProcessDue).toHaveBeenCalledTimes(1);
       expect(mockClosePool).toHaveBeenCalledTimes(1);
       expect(worker.isShuttingDown()).toBe(true);
+      expect(result.forced).toBe(false);
+    });
+  });
+
+  // ==================================================================
+  // D.1 – D.8: lifecycle / observability tests
+  // ==================================================================
+
+  describe('lifecycle observability (D.1 - D.8)', () => {
+    beforeEach(() => {
+      vi.resetModules();
+    });
+
+    afterEach(() => {
+      vi.resetModules();
+      vi.restoreAllMocks();
+    });
+
+    it('D.1 gracefulShutdown resolves {forced:false} after cycle completes', async () => {
+      const cycle = deferred<IntegrationBatchResult>();
+      const mockProcessDue = vi.fn(() => cycle.promise);
+
+      const worker = await loadWorker({
+        processDueIntegrationEvents: mockProcessDue,
+      });
+
+      await worker.startWorker({ intervalMs: 10000, batchSize: 10 });
+
+      await new Promise((r) => setTimeout(r, 20));
+
+      const shutdownPromise = worker.gracefulShutdown();
+      let settled = false;
+      void shutdownPromise.then(() => {
+        settled = true;
+      });
+
+      await new Promise((r) => setTimeout(r, 30));
+      expect(settled).toBe(false);
+
+      cycle.resolve(mockBatchResult);
+      const result = await shutdownPromise;
+
+      expect(result).toEqual({ forced: false });
+      expect(worker.isShuttingDown()).toBe(true);
+    });
+
+    it('D.2 gracefulShutdown returns {forced:true} when cycle exceeds timeout', async () => {
+      const cycle = deferred<IntegrationBatchResult>();
+      const mockProcessDue = vi.fn(() => cycle.promise);
+
+      const worker = await loadWorker({
+        processDueIntegrationEvents: mockProcessDue,
+      });
+
+      await worker.startWorker({ intervalMs: 10000 });
+
+      await new Promise((r) => setTimeout(r, 10));
+
+      const result = await worker.gracefulShutdown({ shutdownTimeoutMs: 20 });
+
+      expect(result.forced).toBe(true);
+      expect(worker.isShuttingDown()).toBe(true);
+
+      cycle.resolve(mockBatchResult);
+    });
+
+    it('D.3 repeated gracefulShutdown calls return the same promise and closePool is called once', async () => {
+      const mockProcessDue = vi.fn().mockResolvedValue(mockBatchResult);
+      const mockClosePool = vi.fn().mockResolvedValue(undefined);
+
+      const worker = await loadWorker({
+        processDueIntegrationEvents: mockProcessDue,
+        closePool: mockClosePool,
+      });
+
+      await worker.startWorker({ intervalMs: 10000 });
+
+      await new Promise((r) => setTimeout(r, 20));
+
+      const p1 = worker.gracefulShutdown();
+      const p2 = worker.gracefulShutdown();
+
+      expect(p1).toBe(p2);
+
+      const result = await p1;
+      expect(result.forced).toBe(false);
+
+      const p3 = worker.gracefulShutdown();
+      const result3 = await p3;
+      expect(result3.forced).toBe(false);
+
+      expect(mockClosePool).toHaveBeenCalledTimes(1);
+    });
+
+    it('D.4 startWorker logs integration_worker_started with required fields', async () => {
+      const mockProcessDue = vi.fn().mockResolvedValue(mockBatchResult);
+
+      const worker = await loadWorkerWithMockLogger({
+        processDueIntegrationEvents: mockProcessDue,
+      });
+
+      mockLogger.info.mockClear();
+
+      await worker.startWorker({ intervalMs: 5000, batchSize: 7 });
+
+      const startCall = mockLogger.info.mock.calls.find(
+        (c) => c[0]?.event === 'integration_worker_started'
+      )!;
+
+      expect(startCall).toBeDefined();
+      expect(startCall[0]).toMatchObject({
+        event: 'integration_worker_started',
+        intervalMs: 5000,
+        batchSize: 7,
+      });
+    });
+
+    it('D.5 runCycle logs integration_worker_cycle_complete with numeric durationMs', async () => {
+      const mockProcessDue = vi.fn().mockResolvedValue(mockBatchResult);
+
+      const worker = await loadWorkerWithMockLogger({
+        processDueIntegrationEvents: mockProcessDue,
+      });
+
+      mockLogger.info.mockClear();
+
+      await worker.runCycle();
+
+      const cycleCall = mockLogger.info.mock.calls.find(
+        (c) => c[0]?.event === 'integration_worker_cycle_complete'
+      )!;
+
+      expect(cycleCall).toBeDefined();
+      expect(cycleCall[0]).toMatchObject({
+        event: 'integration_worker_cycle_complete',
+        processed: 1,
+        succeeded: 1,
+        retried: 0,
+        failed: 0,
+      });
+      expect(typeof cycleCall[0].durationMs).toBe('number');
+      expect(cycleCall[0].durationMs).toBeGreaterThanOrEqual(0);
+    });
+
+    it('D.6 runCycle logs integration_worker_cycle_error on failure with durationMs and error', async () => {
+      const testError = new Error('boom');
+      const mockProcessDue = vi.fn().mockRejectedValue(testError);
+
+      const worker = await loadWorkerWithMockLogger({
+        processDueIntegrationEvents: mockProcessDue,
+      });
+
+      mockLogger.error.mockClear();
+
+      const result = await worker.runCycle();
+
+      expect(result.processed).toBe(0);
+      const errorCall = mockLogger.error.mock.calls.find(
+        (c) => c[0]?.event === 'integration_worker_cycle_error'
+      )!;
+
+      expect(errorCall).toBeDefined();
+      expect(errorCall[0]).toMatchObject({
+        event: 'integration_worker_cycle_error',
+      });
+      expect(typeof errorCall[0].durationMs).toBe('number');
+      expect(errorCall[0].error).toBe('boom');
+    });
+
+    it('D.7 gracefulShutdown logs integration_worker_shutdown_timeout with timeoutMs on timeout', async () => {
+      const cycle = deferred<IntegrationBatchResult>();
+      const mockProcessDue = vi.fn(() => cycle.promise);
+
+      const worker = await loadWorkerWithMockLogger({
+        processDueIntegrationEvents: mockProcessDue,
+      });
+
+      await worker.startWorker({ intervalMs: 10000 });
+
+      await new Promise((r) => setTimeout(r, 10));
+
+      mockLogger.warn.mockClear();
+
+      const result = await worker.gracefulShutdown({ shutdownTimeoutMs: 20 });
+
+      expect(result.forced).toBe(true);
+
+      const timeoutCall = mockLogger.warn.mock.calls.find(
+        (c) => c[0]?.event === 'integration_worker_shutdown_timeout'
+      )!;
+
+      expect(timeoutCall).toBeDefined();
+      expect(timeoutCall[0].timeoutMs).toBe(20);
+
+      cycle.resolve(mockBatchResult);
+    });
+
+    it('D.8 no logger call contains secret-like values (api keys, passwords, tokens)', async () => {
+      const secretPatterns = ['SG.test.key', 'password', 'secret', 'token', 'JWT_SECRET', 'api_key'];
+
+      const worker = await loadWorkerWithMockLogger({
+        processDueIntegrationEvents: vi.fn().mockResolvedValue(mockBatchResult),
+      });
+
+      mockLogger.info.mockClear();
+      mockLogger.warn.mockClear();
+      mockLogger.error.mockClear();
+
+      await worker.startWorker({ intervalMs: 10000, batchSize: 10 });
+      await worker.runCycle();
+      await worker.gracefulShutdown();
+
+      for (const mock of [mockLogger.info, mockLogger.warn, mockLogger.error] as const) {
+        for (const call of mock.mock.calls) {
+          const serialized = JSON.stringify(call);
+          for (const pattern of secretPatterns) {
+            expect(serialized).not.toContain(pattern);
+          }
+        }
+      }
     });
   });
 });

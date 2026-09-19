@@ -78,3 +78,5 @@ services:
         value: "30000"
       - key: INTEGRATION_WORKER_BATCH_SIZE
         value: "50"
+      - key: INTEGRATION_WORKER_SHUTDOWN_TIMEOUT_MS
+        value: "30000"

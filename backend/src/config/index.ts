@@ -16,6 +16,11 @@ const envSchema = z.object({
   INTEGRATION_ENCRYPTION_KEY: z.string().min(1).optional(),
   INTEGRATION_WORKER_INTERVAL_MS: z.coerce.number().default(30000),
   INTEGRATION_WORKER_BATCH_SIZE: z.coerce.number().int().positive().default(50),
+  INTEGRATION_WORKER_SHUTDOWN_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(30000),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -63,6 +68,7 @@ export const config = {
     worker: {
       intervalMs: parsed.data.INTEGRATION_WORKER_INTERVAL_MS,
       batchSize: parsed.data.INTEGRATION_WORKER_BATCH_SIZE,
+      shutdownTimeoutMs: parsed.data.INTEGRATION_WORKER_SHUTDOWN_TIMEOUT_MS,
     },
   },
 };
