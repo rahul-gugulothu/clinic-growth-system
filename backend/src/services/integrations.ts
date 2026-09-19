@@ -1,4 +1,5 @@
 import { getClient } from '../db/index.js';
+import { config } from '../config/index.js';
 import {
   BadRequestError,
   NotFoundError,
@@ -19,6 +20,7 @@ import type {
   GetExecutionEventsParams,
   ProcessIntegrationEventParams,
   RetryIntegrationEventParams,
+  IntegrationBatchResult,
   INTEGRATION_EVENT_STATUS_TRANSITIONS,
 } from '../types/integrations.js';
 import { MAX_INTEGRATION_RETRIES } from '../types/integrations.js';
@@ -538,6 +540,76 @@ export const retryIntegrationEvent = async (
   } finally {
     client.release();
   }
+};
+
+export const processDueIntegrationEvents = async ({
+  limit,
+}: {
+  limit?: number;
+} = {}): Promise<IntegrationBatchResult> => {
+  const client = await getClient();
+
+  const batchSize = limit ?? config.integration.worker.batchSize;
+
+  let events: IntegrationEventRecord[];
+  try {
+    const selectResult = await client.query<IntegrationEventRecord>(
+      `SELECT *
+       FROM integration_events
+       WHERE status = 'pending'
+          OR (status = 'retry' AND next_retry_at <= NOW())
+       ORDER BY created_at ASC
+       LIMIT $1`,
+      [batchSize]
+    );
+    events = selectResult.rows;
+  } finally {
+    client.release();
+  }
+
+  const result: IntegrationBatchResult = {
+    processed: 0,
+    succeeded: 0,
+    retried: 0,
+    failed: 0,
+  };
+
+  for (const event of events) {
+    result.processed += 1;
+    try {
+      const updated = await processIntegrationEvent({
+        eventId: event.id,
+        organizationId: event.organization_id,
+        userId: null,
+        clinicId: event.clinic_id,
+      });
+
+      if (updated.status === 'sent') {
+        result.succeeded += 1;
+      } else if (updated.status === 'retry') {
+        result.retried += 1;
+      } else if (updated.status === 'failed') {
+        result.failed += 1;
+      } else {
+        result.failed += 1;
+      }
+    } catch {
+      result.failed += 1;
+    }
+  }
+
+  logger.info(
+    {
+      event: 'integration_events_batch_processed',
+      processed: result.processed,
+      succeeded: result.succeeded,
+      retried: result.retried,
+      failed: result.failed,
+    },
+    'Processed due integration events'
+  );
+
+  return result;
 };
 
 export { INTEGRATION_EVENT_STATUS_TRANSITIONS };

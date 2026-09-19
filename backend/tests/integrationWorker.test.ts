@@ -1,0 +1,409 @@
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { Pool } from 'pg';
+import { createTestDatabase, type TestDatabase } from './helpers.js';
+import { setPool } from '../src/db/index.js';
+import { processDueIntegrationEvents } from '../src/services/integrations.js';
+import { setIntegrationConfig } from '../src/services/integrationConfigs.js';
+import { httpRequest } from '../src/utils/httpClient.js';
+import type { IntegrationEventRecord } from '../src/types/integrations.js';
+
+vi.mock('../src/utils/httpClient.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../src/utils/httpClient.js')>();
+  return { ...actual, httpRequest: vi.fn() };
+});
+
+const mockedHttpRequest = vi.mocked(httpRequest);
+
+const DEV_ORG_ID = '00000000-0000-0000-0000-000000000001';
+const ORG_B_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+
+const MOCK_PROVIDER = 'mock';
+const SENDGRID_PROVIDER = 'sendgrid';
+
+const TEST_API_KEY = 'SG.test.key.123';
+const TEST_FROM_EMAIL = 'from@example.com';
+
+const pastIso = (secondsAgo = 1): string =>
+  new Date(Date.now() - secondsAgo * 1000).toISOString();
+const futureIso = (secondsAhead = 3600): string =>
+  new Date(Date.now() + secondsAhead * 1000).toISOString();
+
+const makeHeaders = (entries: Record<string, string | null> = {}) => ({
+  get: (name: string) => entries[name.toLowerCase()] ?? null,
+});
+const okResponse = (h: Record<string, string | null> = {}) => ({
+  status: 202,
+  ok: true,
+  headers: makeHeaders(h),
+});
+
+const deferred = <T = unknown>() => {
+  let resolve!: (value: T) => void;
+  let reject!: (err: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+};
+
+type EventType = IntegrationEventRecord['status'];
+
+const seedSendgridConfig = async (): Promise<void> => {
+  await setIntegrationConfig({
+    organizationId: DEV_ORG_ID,
+    provider: SENDGRID_PROVIDER,
+    configKey: 'api_key',
+    value: TEST_API_KEY,
+  });
+  await setIntegrationConfig({
+    organizationId: DEV_ORG_ID,
+    provider: SENDGRID_PROVIDER,
+    configKey: 'from_email',
+    value: TEST_FROM_EMAIL,
+  });
+};
+
+describe('V3.1.3-A Integration Worker', () => {
+  let tdb: TestDatabase;
+  let memPool: Pool;
+
+  const query = (sql: string, params?: unknown[]) =>
+    params ? memPool.query(sql, params) : memPool.query(sql);
+
+  const insertEvent = async (data: {
+    organizationId?: string;
+    provider?: string;
+    status?: EventType;
+    retryCount?: number;
+    nextRetryAt?: string | null;
+    payload?: Record<string, unknown>;
+    eventType?: string;
+  }): Promise<IntegrationEventRecord> => {
+    const res = await memPool.query<IntegrationEventRecord>(
+      `INSERT INTO integration_events
+         (organization_id, clinic_id, ai_execution_id, provider, event_type, payload, status, retry_count, next_retry_at)
+       VALUES ($1, NULL, NULL, $2, $3, $4, $5, $6, $7)
+       RETURNING *`,
+      [
+        data.organizationId ?? DEV_ORG_ID,
+        data.provider ?? MOCK_PROVIDER,
+        data.eventType ?? 'test.event',
+        JSON.stringify(data.payload ?? {}),
+        data.status ?? 'pending',
+        data.retryCount ?? 0,
+        data.nextRetryAt ?? null,
+      ]
+    );
+    return res.rows[0];
+  };
+
+  const getEvent = async (id: string): Promise<IntegrationEventRecord> => {
+    const res = await memPool.query<IntegrationEventRecord>(
+      `SELECT * FROM integration_events WHERE id = $1`,
+      [id]
+    );
+    return res.rows[0];
+  };
+
+  // ==================================================================
+  // Setup shared by processor tests and lifecycle tests
+  // ==================================================================
+
+  beforeAll(async () => {
+    tdb = createTestDatabase();
+    const pgLib = tdb.db.adapters.createPg();
+    memPool = new pgLib.Pool();
+    setPool(memPool);
+
+    await memPool.query(
+      `INSERT INTO organizations (id, name, status, timezone, data_source, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, NOW(), NOW())`,
+      [ORG_B_ID, 'Test Org B', 'trial', 'UTC', 'demo']
+    );
+  });
+
+  afterAll(async () => {
+    setPool(null);
+    await memPool.end();
+  });
+
+  beforeEach(async () => {
+    mockedHttpRequest.mockReset();
+    await memPool.query(`DELETE FROM integration_events`);
+    await memPool.query(`DELETE FROM integration_configs`);
+    await memPool.query(`DELETE FROM audit_log`);
+  });
+
+  // ==================================================================
+  // A.1 – A.12: processor behavior
+  // ==================================================================
+
+  describe('processDueIntegrationEvents (A.1 - A.12)', () => {
+    it('A.1 pending event is selected for processing', async () => {
+      const ev = await insertEvent({ status: 'pending' });
+
+      const result = await processDueIntegrationEvents();
+
+      expect(result.processed).toBe(1);
+      const after = await getEvent(ev.id);
+      expect(after.status).toBe('sent');
+    });
+
+    it('A.2 retry event with due next_retry_at is selected', async () => {
+      const ev = await insertEvent({
+        status: 'retry',
+        retryCount: 1,
+        nextRetryAt: pastIso(),
+      });
+
+      const result = await processDueIntegrationEvents();
+
+      expect(result.processed).toBe(1);
+      expect(result.retried).toBe(0);
+      const after = await getEvent(ev.id);
+      expect(after.status).toBe('sent');
+    });
+
+    it('A.3 retry event with future next_retry_at is not selected', async () => {
+      const ev = await insertEvent({
+        status: 'retry',
+        retryCount: 1,
+        nextRetryAt: futureIso(),
+      });
+
+      const result = await processDueIntegrationEvents();
+
+      expect(result.processed).toBe(0);
+      const after = await getEvent(ev.id);
+      expect(after.status).toBe('retry');
+    });
+
+    it('A.4 sent event is not selected', async () => {
+      const ev = await insertEvent({ status: 'sent' });
+
+      const result = await processDueIntegrationEvents();
+
+      expect(result.processed).toBe(0);
+      const after = await getEvent(ev.id);
+      expect(after.status).toBe('sent');
+    });
+
+    it('A.5 failed event is not selected', async () => {
+      const ev = await insertEvent({ status: 'failed', retryCount: 4 });
+
+      const result = await processDueIntegrationEvents();
+
+      expect(result.processed).toBe(0);
+      const after = await getEvent(ev.id);
+      expect(after.status).toBe('failed');
+    });
+
+    it('A.6 batch limit is respected', async () => {
+      for (let i = 0; i < 10; i++) {
+        await insertEvent({ status: 'pending' });
+      }
+
+      const result = await processDueIntegrationEvents({ limit: 5 });
+
+      expect(result.processed).toBe(5);
+      expect(result.succeeded).toBe(5);
+
+      const sentRows = await query(`SELECT COUNT(*)::int AS count FROM integration_events WHERE status = 'sent'`);
+      expect(sentRows.rows[0].count).toBe(5);
+    });
+
+    it('A.7 successful SendGrid event becomes sent', async () => {
+      await seedSendgridConfig();
+      mockedHttpRequest.mockResolvedValue(okResponse({ 'x-message-id': 'sg-msg-1' }));
+
+      const ev = await insertEvent({
+        provider: SENDGRID_PROVIDER,
+        payload: { to: 'recipient@example.com', subject: 'S', body: 'B', body_type: 'text' },
+      });
+
+      const result = await processDueIntegrationEvents();
+
+      expect(result.processed).toBe(1);
+      expect(result.succeeded).toBe(1);
+      const after = await getEvent(ev.id);
+      expect(after.status).toBe('sent');
+    });
+
+    it('A.8 transient provider failure uses existing retry semantics', async () => {
+      const ev = await insertEvent({
+        provider: MOCK_PROVIDER,
+        payload: { mock_fail: true },
+      });
+
+      const result = await processDueIntegrationEvents();
+
+      expect(result.processed).toBe(1);
+      expect(result.retried).toBe(1);
+      const after = await getEvent(ev.id);
+      expect(after.status).toBe('retry');
+      expect(after.retry_count).toBe(1);
+      expect(after.next_retry_at).not.toBeNull();
+      expect(after.error_message).not.toBeNull();
+    });
+
+    it('A.9 exhausted failure becomes failed', async () => {
+      const ev = await insertEvent({
+        provider: MOCK_PROVIDER,
+        payload: { mock_fail: true },
+        retryCount: 3,
+      });
+
+      const result = await processDueIntegrationEvents();
+
+      expect(result.processed).toBe(1);
+      expect(result.failed).toBe(1);
+      const after = await getEvent(ev.id);
+      expect(after.status).toBe('failed');
+      expect(after.retry_count).toBe(4);
+      expect(after.next_retry_at).toBeNull();
+    });
+
+    it('A.10 one failing event does not stop later events', async () => {
+      const failing = await insertEvent({
+        provider: 'nonexistent-provider',
+        status: 'pending',
+      });
+      const good = await insertEvent({ provider: MOCK_PROVIDER, status: 'pending' });
+
+      const result = await processDueIntegrationEvents();
+
+      expect(result.processed).toBe(2);
+      expect(result.succeeded).toBe(1);
+      expect(result.failed).toBe(1);
+
+      const f = await getEvent(failing.id);
+      const g = await getEvent(good.id);
+      expect(f.status).toBe('pending');
+      expect(g.status).toBe('sent');
+    });
+
+    it('A.11 multiple organizations use each event organization_id', async () => {
+      const ev1 = await insertEvent({
+        organizationId: DEV_ORG_ID,
+        provider: MOCK_PROVIDER,
+        status: 'pending',
+      });
+      const ev2 = await insertEvent({
+        organizationId: ORG_B_ID,
+        provider: MOCK_PROVIDER,
+        status: 'pending',
+      });
+
+      const result = await processDueIntegrationEvents();
+
+      expect(result.processed).toBe(2);
+      expect(result.succeeded).toBe(2);
+
+      const a1 = await getEvent(ev1.id);
+      const a2 = await getEvent(ev2.id);
+      expect(a1.organization_id).toBe(DEV_ORG_ID);
+      expect(a2.organization_id).toBe(ORG_B_ID);
+      expect(a1.status).toBe('sent');
+      expect(a2.status).toBe('sent');
+    });
+
+    it('A.12 HTTP layer remains mocked; no real SendGrid request', async () => {
+      expect(vi.isMockFunction(httpRequest)).toBe(true);
+
+      await seedSendgridConfig();
+      mockedHttpRequest.mockResolvedValue(okResponse({ 'x-message-id': 'sg-msg' }));
+
+      const ev = await insertEvent({
+        provider: SENDGRID_PROVIDER,
+        payload: { to: 'recipient@example.com', subject: 'S', body: 'B' },
+      });
+
+      await processDueIntegrationEvents({ limit: 1 });
+
+      expect(mockedHttpRequest).toHaveBeenCalledTimes(1);
+      expect(mockedHttpRequest).toHaveBeenCalledWith(
+        'https://api.sendgrid.com/v3/mail/send',
+        expect.objectContaining({ method: 'POST' })
+      );
+
+      const after = await getEvent(ev.id);
+      expect(after.status).toBe('sent');
+    });
+  });
+
+  // ==================================================================
+  // A.13 – A.14: worker lifecycle (isolated dynamic imports)
+  // ==================================================================
+
+  describe('worker lifecycle (A.13 - A.14)', () => {
+    afterEach(() => {
+      vi.resetModules();
+      vi.restoreAllMocks();
+    });
+
+    it('A.13 importing the worker does not auto-start Express or the worker', async () => {
+      const mockProcessDue = vi.fn();
+      const mockCreatePool = vi.fn();
+      const mockClosePool = vi.fn().mockResolvedValue(undefined);
+
+      vi.doMock('../src/services/integrations.js', () => ({
+        processDueIntegrationEvents: mockProcessDue,
+      }));
+      vi.doMock('../src/db/index.js', () => ({
+        createPool: mockCreatePool,
+        closePool: mockClosePool,
+      }));
+
+      const worker = await import('../src/workers/integrationWorker.js');
+
+      expect(typeof worker.runCycle).toBe('function');
+      expect(typeof worker.startWorker).toBe('function');
+      expect(typeof worker.gracefulShutdown).toBe('function');
+
+      expect(mockProcessDue).not.toHaveBeenCalled();
+      expect(mockCreatePool).not.toHaveBeenCalled();
+      expect(mockClosePool).not.toHaveBeenCalled();
+    });
+
+    it('A.14 shutdown waits for active cycle and prevents future cycles', async () => {
+      const cycle = deferred<void>();
+      const mockProcessDue = vi.fn(() => cycle.promise);
+      const mockCreatePool = vi.fn();
+      const mockClosePool = vi.fn().mockResolvedValue(undefined);
+
+      vi.doMock('../src/services/integrations.js', () => ({
+        processDueIntegrationEvents: mockProcessDue,
+      }));
+      vi.doMock('../src/db/index.js', () => ({
+        createPool: mockCreatePool,
+        closePool: mockClosePool,
+      }));
+
+      const worker = await import('../src/workers/integrationWorker.js');
+
+      await worker.startWorker({ intervalMs: 10, batchSize: 5 });
+
+      expect(mockCreatePool).toHaveBeenCalledTimes(1);
+      expect(mockProcessDue).toHaveBeenCalledTimes(1);
+
+      const shutdownPromise = worker.gracefulShutdown();
+      let settled = false;
+      void shutdownPromise.then(() => {
+        settled = true;
+      });
+
+      await new Promise((r) => setTimeout(r, 30));
+      expect(settled).toBe(false);
+
+      cycle.resolve();
+      await shutdownPromise;
+
+      await new Promise((r) => setTimeout(r, 30));
+      expect(mockProcessDue).toHaveBeenCalledTimes(1);
+      expect(mockClosePool).toHaveBeenCalledTimes(1);
+      expect(worker.isShuttingDown()).toBe(true);
+    });
+  });
+});

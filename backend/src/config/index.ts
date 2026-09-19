@@ -14,6 +14,8 @@ const envSchema = z.object({
   AUTH_RATE_LIMIT_MAX: z.coerce.number().default(5),
   AUTH_RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60000),
   INTEGRATION_ENCRYPTION_KEY: z.string().min(1).optional(),
+  INTEGRATION_WORKER_INTERVAL_MS: z.coerce.number().default(30000),
+  INTEGRATION_WORKER_BATCH_SIZE: z.coerce.number().int().positive().default(50),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -58,5 +60,9 @@ export const config = {
   },
   integration: {
     encryptionKey: parsed.data.INTEGRATION_ENCRYPTION_KEY ?? null,
+    worker: {
+      intervalMs: parsed.data.INTEGRATION_WORKER_INTERVAL_MS,
+      batchSize: parsed.data.INTEGRATION_WORKER_BATCH_SIZE,
+    },
   },
 };

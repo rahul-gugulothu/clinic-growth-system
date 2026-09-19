@@ -58,8 +58,15 @@ export interface GetExecutionEventsParams {
 export interface ProcessIntegrationEventParams {
   eventId: string;
   organizationId: string;
-  userId: string;
+  userId: string | null;
   clinicId: string | null;
+}
+
+export interface IntegrationBatchResult {
+  processed: number;
+  succeeded: number;
+  retried: number;
+  failed: number;
 }
 
 export interface RetryIntegrationEventParams {
