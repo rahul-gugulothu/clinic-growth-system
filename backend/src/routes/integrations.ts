@@ -1,8 +1,8 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { z } from 'zod';
 import { requireAuth, getAuthContext } from '../middleware/auth.js';
-import { BadRequestError, NotFoundError } from '../types/index.js';
-import { getIntegrationEvent, getExecutionEvents } from '../services/integrations.js';
+import { BadRequestError, NotFoundError, ForbiddenError, INTERNAL_ROLES } from '../types/index.js';
+import { getIntegrationEvent, getExecutionEvents, retryIntegrationEvent } from '../services/integrations.js';
 
 const router = Router();
 
@@ -70,6 +70,43 @@ router.get(
       });
 
       res.json({ events });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+router.post(
+  '/events/:id/retry',
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const auth = getAuthContext(req);
+      if (!auth) {
+        next(new BadRequestError('Authentication context not found'));
+        return;
+      }
+
+      if (!INTERNAL_ROLES.includes(auth.role)) {
+        throw new ForbiddenError(
+          'Only organization-level users can retry integration events'
+        );
+      }
+
+      const idResult = eventIdSchema.safeParse(req.params.id);
+      if (!idResult.success) {
+        next(new BadRequestError('Invalid event ID'));
+        return;
+      }
+
+      const event = await retryIntegrationEvent({
+        eventId: idResult.data,
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        userRole: auth.role,
+        clinicId: auth.clinicId,
+      });
+
+      res.json({ event });
     } catch (err) {
       next(err);
     }

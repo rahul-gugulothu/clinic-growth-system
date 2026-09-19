@@ -1,3 +1,5 @@
+import type { UserRole } from './index.js';
+
 export interface IntegrationEventRecord {
   id: string;
   organization_id: string;
@@ -52,3 +54,27 @@ export interface GetExecutionEventsParams {
   executionId: string;
   organizationId: string;
 }
+
+export interface ProcessIntegrationEventParams {
+  eventId: string;
+  organizationId: string;
+  userId: string;
+  clinicId: string | null;
+}
+
+export interface RetryIntegrationEventParams {
+  eventId: string;
+  organizationId: string;
+  userId: string;
+  userRole: UserRole;
+  clinicId: string | null;
+}
+
+export const MAX_INTEGRATION_RETRIES = 3;
+
+export const INTEGRATION_EVENT_STATUS_TRANSITIONS: Record<IntegrationEventStatus, IntegrationEventStatus[]> = {
+  pending: ['sent', 'retry', 'failed'],
+  retry: ['sent', 'retry', 'failed'],
+  sent: [],
+  failed: [],
+};

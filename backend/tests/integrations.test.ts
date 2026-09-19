@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
 import request from 'supertest';
-import { BadRequestError, NotFoundError } from '../src/types/index.js';
+import { BadRequestError, NotFoundError, ForbiddenError } from '../src/types/index.js';
 import type { AuthContext } from '../src/types/index.js';
 import { createTestDatabase, type TestDatabase } from './helpers.js';
 import { setPool } from '../src/db/index.js';
@@ -12,7 +12,10 @@ import {
   createIntegrationEvent,
   getIntegrationEvent,
   getExecutionEvents,
+  processIntegrationEvent,
+  retryIntegrationEvent,
 } from '../src/services/integrations.js';
+import type { IntegrationEventRecord } from '../src/types/integrations.js';
 
 const DEV_ORG_ID = '00000000-0000-0000-0000-000000000001';
 const DEV_PROSPECT_ID = '00000000-0000-0000-0000-000000000010';
@@ -54,6 +57,7 @@ const userBToken = signAccessToken(userBAuth);
 
 const WHATSAPP_PROVIDER = 'whatsapp';
 const EMAIL_PROVIDER = 'email';
+const MOCK_PROVIDER = 'mock';
 const MESSAGE_EVENT_TYPE = 'outbound_message';
 const PROPOSAL_EVENT_TYPE = 'proposal_delivery';
 
@@ -840,6 +844,492 @@ describe('V3.1.2-A Integration Events', () => {
         .set('Authorization', `Bearer ${founderToken}`);
 
       expect(result.status).toBe(400);
+    });
+  });
+
+  // ==================================================================
+  // B. processIntegrationEvent
+  // ==================================================================
+
+  describe('B. processIntegrationEvent', () => {
+    const createMockEvent = async (payload: Record<string, unknown> = {}) => {
+      const execResult = await executeTool(
+        'draft-email',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      await approveExecution({
+        executionId: execResult.id,
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        userRole: 'founder',
+        clinicId: null,
+      });
+
+      return createIntegrationEvent({
+        executionId: execResult.id,
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        clinicId: null,
+        provider: MOCK_PROVIDER,
+        eventType: MESSAGE_EVENT_TYPE,
+        payload,
+      });
+    };
+
+    const processEvent = (eventId: string) =>
+      processIntegrationEvent({
+        eventId,
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        clinicId: null,
+      });
+
+    const setRetryWindowOpen = async (eventId: string) => {
+      await query(
+        `UPDATE integration_events
+           SET next_retry_at = NOW() - INTERVAL '1 hour'
+         WHERE id = $1`,
+        [eventId]
+      );
+    };
+
+    const clearMockFail = async (eventId: string) => {
+      await query(`UPDATE integration_events SET payload = $1 WHERE id = $2`, [
+        JSON.stringify({}),
+        eventId,
+      ]);
+    };
+
+    it('S.17 pending → sent on provider success', async () => {
+      const event = await createMockEvent({});
+
+      const result = await processEvent(event.id);
+
+      expect(result.status).toBe('sent');
+      expect(result.error_message).toBeNull();
+      expect(result.next_retry_at).toBeNull();
+    });
+
+    it('S.18 pending → retry on provider failure', async () => {
+      const event = await createMockEvent({ mock_fail: true });
+
+      const result = await processEvent(event.id);
+
+      expect(result.status).toBe('retry');
+      expect(result.retry_count).toBe(1);
+      expect(result.next_retry_at).not.toBeNull();
+      expect(result.error_message).not.toBeNull();
+    });
+
+    it('S.19 retry_count=3 + failure → failed, retry_count=4', async () => {
+      const event = await createMockEvent({ mock_fail: true });
+      await query(`UPDATE integration_events SET retry_count = 3 WHERE id = $1`, [event.id]);
+
+      const result = await processEvent(event.id);
+
+      expect(result.status).toBe('failed');
+      expect(result.retry_count).toBe(4);
+      expect(result.next_retry_at).toBeNull();
+    });
+
+    it('S.20 retry → sent on successful retry', async () => {
+      const event = await createMockEvent({ mock_fail: true });
+
+      await processEvent(event.id);
+
+      await setRetryWindowOpen(event.id);
+      await clearMockFail(event.id);
+
+      const result = await processEvent(event.id);
+
+      expect(result.status).toBe('sent');
+      expect(result.sent_at).not.toBeNull();
+    });
+
+    it('S.21 retry → retry on repeated failure', async () => {
+      const event = await createMockEvent({ mock_fail: true });
+
+      await processEvent(event.id);
+
+      await setRetryWindowOpen(event.id);
+
+      const result = await processEvent(event.id);
+
+      expect(result.status).toBe('retry');
+      expect(result.retry_count).toBe(2);
+    });
+
+    it('S.22 retry → failed when limit exhausted', async () => {
+      const event = await createMockEvent({ mock_fail: true });
+
+      await query(`UPDATE integration_events SET retry_count = 3, status = 'retry' WHERE id = $1`, [event.id]);
+      await setRetryWindowOpen(event.id);
+
+      const result = await processEvent(event.id);
+
+      expect(result.status).toBe('failed');
+      expect(result.retry_count).toBe(4);
+    });
+
+    it('S.23 retry_count progression 0→1→2→3→4', async () => {
+      const event = await createMockEvent({ mock_fail: true });
+
+      const r1 = await processEvent(event.id);
+      expect(r1.retry_count).toBe(1);
+
+      await setRetryWindowOpen(event.id);
+      const r2 = await processEvent(event.id);
+      expect(r2.retry_count).toBe(2);
+
+      await setRetryWindowOpen(event.id);
+      const r3 = await processEvent(event.id);
+      expect(r3.retry_count).toBe(3);
+
+      await setRetryWindowOpen(event.id);
+      const r4 = await processEvent(event.id);
+      expect(r4.retry_count).toBe(4);
+      expect(r4.status).toBe('failed');
+    });
+
+    it('S.24 sent_at populated on success', async () => {
+      const event = await createMockEvent({});
+
+      const result = await processEvent(event.id);
+
+      expect(result.sent_at).not.toBeNull();
+    });
+
+    it('S.25 next_retry_at populated on retry', async () => {
+      const event = await createMockEvent({ mock_fail: true });
+
+      const result = await processEvent(event.id);
+
+      expect(result.next_retry_at).not.toBeNull();
+    });
+
+    it('S.26 next_retry_at cleared on success', async () => {
+      const event = await createMockEvent({ mock_fail: true });
+
+      await processEvent(event.id);
+
+      await setRetryWindowOpen(event.id);
+      await clearMockFail(event.id);
+
+      const result = await processEvent(event.id);
+
+      expect(result.status).toBe('sent');
+      expect(result.next_retry_at).toBeNull();
+    });
+
+    it('S.27 error_message persisted on provider failure', async () => {
+      const event = await createMockEvent({ mock_fail: true });
+
+      const result = await processEvent(event.id);
+
+      expect(result.error_message).not.toBeNull();
+      expect(result.error_message).toContain('Mock provider');
+    });
+
+    it('S.28 unknown provider fails safely', async () => {
+      const event = await createMockEvent({});
+      await query(`UPDATE integration_events SET provider = 'nonexistent' WHERE id = $1`, [event.id]);
+
+      await expect(processEvent(event.id)).rejects.toThrow(BadRequestError);
+    });
+
+    it('S.29 sent event cannot be processed again', async () => {
+      const event = await createMockEvent({});
+
+      await processEvent(event.id);
+
+      await expect(processEvent(event.id)).rejects.toThrow(BadRequestError);
+    });
+
+    it('S.30 exhausted failed event cannot be processed', async () => {
+      const event = await createMockEvent({ mock_fail: true });
+      await query(`UPDATE integration_events SET retry_count = 3, status = 'retry' WHERE id = $1`, [event.id]);
+      await setRetryWindowOpen(event.id);
+      await processEvent(event.id);
+
+      await expect(processEvent(event.id)).rejects.toThrow(BadRequestError);
+    });
+
+    it('S.36 cross-org processing denied', async () => {
+      const event = await createMockEvent({});
+
+      await expect(
+        processIntegrationEvent({
+          eventId: event.id,
+          organizationId: ORG_B_ID,
+          userId: DEV_FOUNDER_ID,
+          clinicId: null,
+        })
+      ).rejects.toThrow(NotFoundError);
+    });
+
+    it('S.40 concurrent process attempts cannot both send', async () => {
+      const event = await createMockEvent({});
+
+      const [r1, r2] = await Promise.allSettled([
+        processEvent(event.id),
+        processEvent(event.id),
+      ]);
+
+      const fulfilled = [r1, r2].filter((r) => r.status === 'fulfilled');
+      expect(fulfilled.length).toBe(1);
+
+      const result = (fulfilled[0] as PromiseFulfilledResult<IntegrationEventRecord>).value;
+      expect(result.status).toBe('sent');
+    });
+  });
+
+  // ==================================================================
+  // B. retryIntegrationEvent
+  // ==================================================================
+
+  describe('B. retryIntegrationEvent', () => {
+    const createMockEvent = async (payload: Record<string, unknown> = {}) => {
+      const execResult = await executeTool(
+        'draft-email',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      await approveExecution({
+        executionId: execResult.id,
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        userRole: 'founder',
+        clinicId: null,
+      });
+
+      return createIntegrationEvent({
+        executionId: execResult.id,
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        clinicId: null,
+        provider: MOCK_PROVIDER,
+        eventType: MESSAGE_EVENT_TYPE,
+        payload,
+      });
+    };
+
+    const processEvent = (eventId: string) =>
+      processIntegrationEvent({
+        eventId,
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        clinicId: null,
+      });
+
+    const setRetryWindowOpen = async (eventId: string) => {
+      await query(
+        `UPDATE integration_events
+           SET next_retry_at = NOW() - INTERVAL '1 hour'
+         WHERE id = $1`,
+        [eventId]
+      );
+    };
+
+    it('S.31 manual retry changes failed → pending', async () => {
+      const event = await createMockEvent({ mock_fail: true });
+      await query(`UPDATE integration_events SET retry_count = 3, status = 'retry' WHERE id = $1`, [event.id]);
+      await setRetryWindowOpen(event.id);
+      await processEvent(event.id);
+
+      const result = await retryIntegrationEvent({
+        eventId: event.id,
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        userRole: 'founder',
+        clinicId: null,
+      });
+
+      expect(result.status).toBe('pending');
+      expect(result.next_retry_at).toBeNull();
+    });
+
+    it('S.31b manual retry changes retry → pending', async () => {
+      const event = await createMockEvent({ mock_fail: true });
+      await processEvent(event.id);
+      await setRetryWindowOpen(event.id);
+
+      const result = await retryIntegrationEvent({
+        eventId: event.id,
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        userRole: 'founder',
+        clinicId: null,
+      });
+
+      expect(result.status).toBe('pending');
+      expect(result.next_retry_at).toBeNull();
+    });
+
+    it('S.32 manual retry writes integration_retry_requested audit', async () => {
+      const event = await createMockEvent({ mock_fail: true });
+      await query(`UPDATE integration_events SET retry_count = 3, status = 'retry' WHERE id = $1`, [event.id]);
+      await setRetryWindowOpen(event.id);
+      await processEvent(event.id);
+
+      await retryIntegrationEvent({
+        eventId: event.id,
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        userRole: 'founder',
+        clinicId: null,
+      });
+
+      const auditRows = await query(
+        `SELECT * FROM audit_log
+         WHERE entity = $1 AND entity_id = $2 AND action = $3
+         ORDER BY created_at DESC`,
+        ['integration_event', event.id, 'integration_retry_requested']
+      );
+      expect(auditRows.rows.length).toBe(1);
+      expect(auditRows.rows[0].new_values).toMatchObject({
+        status: 'pending',
+      });
+    });
+
+    it('S.33 integration_sent audit written', async () => {
+      const event = await createMockEvent({});
+      await processEvent(event.id);
+
+      const auditRows = await query(
+        `SELECT * FROM audit_log
+         WHERE entity = $1 AND entity_id = $2 AND action = $3
+         ORDER BY created_at DESC`,
+        ['integration_event', event.id, 'integration_sent']
+      );
+      expect(auditRows.rows.length).toBe(1);
+      expect(auditRows.rows[0].new_values).toMatchObject({
+        status: 'sent',
+      });
+    });
+
+    it('S.34 integration_retry_scheduled audit written', async () => {
+      const event = await createMockEvent({ mock_fail: true });
+      await processEvent(event.id);
+
+      const auditRows = await query(
+        `SELECT * FROM audit_log
+         WHERE entity = $1 AND entity_id = $2 AND action = $3
+         ORDER BY created_at DESC`,
+        ['integration_event', event.id, 'integration_retry_scheduled']
+      );
+      expect(auditRows.rows.length).toBe(1);
+      expect(auditRows.rows[0].new_values).toMatchObject({
+        status: 'retry',
+      });
+    });
+
+    it('S.35 integration_failed audit written', async () => {
+      const event = await createMockEvent({ mock_fail: true });
+      await query(`UPDATE integration_events SET retry_count = 3, status = 'retry' WHERE id = $1`, [event.id]);
+      await setRetryWindowOpen(event.id);
+      await processEvent(event.id);
+
+      const auditRows = await query(
+        `SELECT * FROM audit_log
+         WHERE entity = $1 AND entity_id = $2 AND action = $3
+         ORDER BY created_at DESC`,
+        ['integration_event', event.id, 'integration_failed']
+      );
+      expect(auditRows.rows.length).toBe(1);
+      expect(auditRows.rows[0].new_values).toMatchObject({
+        status: 'failed',
+      });
+    });
+
+    it('S.37 clinic-scoped role denied manual retry', async () => {
+      const event = await createMockEvent({ mock_fail: true });
+
+      await expect(
+        retryIntegrationEvent({
+          eventId: event.id,
+          organizationId: DEV_ORG_ID,
+          userId: DEV_CLINIC_OWNER_ID,
+          userRole: 'clinic_owner',
+          clinicId: DEV_CLINIC_ID,
+        })
+      ).rejects.toThrow(ForbiddenError);
+    });
+  });
+
+  // ==================================================================
+  // B. Retry Routes
+  // ==================================================================
+
+  describe('B. Retry Routes', () => {
+    let eventId: string;
+
+    beforeAll(async () => {
+      const execResult = await executeTool(
+        'draft-email',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID }
+      );
+
+      await approveExecution({
+        executionId: execResult.id,
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        userRole: 'founder',
+        clinicId: null,
+      });
+
+      const event = await createIntegrationEvent({
+        executionId: execResult.id,
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        clinicId: null,
+        provider: MOCK_PROVIDER,
+        eventType: MESSAGE_EVENT_TYPE,
+        payload: { mock_fail: true },
+      });
+
+      await query(
+        `UPDATE integration_events SET retry_count = 3, status = 'retry' WHERE id = $1`,
+        [event.id]
+      );
+      await query(
+        `UPDATE integration_events SET next_retry_at = NOW() - INTERVAL '1 hour' WHERE id = $1`,
+        [event.id]
+      );
+
+      await processIntegrationEvent({
+        eventId: event.id,
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        clinicId: null,
+      });
+
+      eventId = event.id;
+    });
+
+    it('S.38 unauthenticated retry route → 401', async () => {
+      const result = await request(app).post(
+        `/api/v1/integrations/events/${eventId}/retry`
+      );
+
+      expect(result.status).toBe(401);
+    });
+
+    it('S.39 retry route rejects unauthorized role', async () => {
+      const result = await request(app)
+        .post(`/api/v1/integrations/events/${eventId}/retry`)
+        .set('Authorization', `Bearer ${clinicOwnerToken}`);
+
+      expect(result.status).toBe(403);
     });
   });
 });
