@@ -18,3 +18,10 @@ if (!process.env.JWT_REFRESH_SECRET) {
 if (!process.env.AUTH_RATE_LIMIT_MAX) {
   process.env.AUTH_RATE_LIMIT_MAX = '100';
 }
+
+// AES-256-GCM encryption key for testing integration config encryption.
+// Must be 64 hex characters (32 bytes). DO NOT use in production.
+if (!process.env.INTEGRATION_ENCRYPTION_KEY) {
+  process.env.INTEGRATION_ENCRYPTION_KEY =
+    '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff';
+}

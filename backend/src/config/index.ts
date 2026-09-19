@@ -13,6 +13,7 @@ const envSchema = z.object({
   CORS_ORIGIN: z.string().default('http://localhost:5173'),
   AUTH_RATE_LIMIT_MAX: z.coerce.number().default(5),
   AUTH_RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60000),
+  INTEGRATION_ENCRYPTION_KEY: z.string().min(1).optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -54,5 +55,8 @@ export const config = {
   rateLimit: {
     max: parsed.data.AUTH_RATE_LIMIT_MAX,
     windowMs: parsed.data.AUTH_RATE_LIMIT_WINDOW_MS,
+  },
+  integration: {
+    encryptionKey: parsed.data.INTEGRATION_ENCRYPTION_KEY ?? null,
   },
 };
