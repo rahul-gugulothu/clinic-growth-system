@@ -174,8 +174,17 @@ describe('V3.1.2-A Integration Events', () => {
     // Insert Org B founder user (for cross-org tests needing valid FK)
     await tdb.public.none(`
       INSERT INTO users (id, email, role, organization_id, clinic_id, data_source, created_at, updated_at)
-      VALUES ('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee03', 'founder@orgb.local', 'founder',
-       '${ORG_B_ID}', NULL, 'demo', NOW(), NOW())
+       VALUES ('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee03', 'founder@orgb.local', 'founder',
+        '${ORG_B_ID}', NULL, 'demo', NOW(), NOW())
+    `);
+
+    // V3.1.2-C3-A (test fixture): seed a routable email on DEV_PROSPECT_ID so
+    // draft-email executions succeed. The prospects.email column is nullable.
+    await tdb.public.none(`
+      UPDATE prospects
+      SET email = 'dr.anaya.kaya@example.com'
+      WHERE id = '${DEV_PROSPECT_ID}'
+        AND organization_id = '${DEV_ORG_ID}'
     `);
   });
 
@@ -685,8 +694,13 @@ describe('V3.1.2-A Integration Events', () => {
         executionId: execResult.id,
         organizationId: DEV_ORG_ID,
       });
-      expect(devEvents.length).toBe(1);
-      expect(devEvents[0].id).toBe(event.id);
+      // DEV_ORG_ID sees its own events. Approve of a draft-email execution now
+      // also creates a sendgrid/email.send event (via the C3-B approval bridge),
+      // so two events are expected here: the auto-created bridge event plus this
+      // manually-created one.
+      expect(devEvents.length).toBe(2);
+      expect(devEvents.map((e) => e.id)).toContain(event.id);
+      expect(devEvents.every((e) => e.organization_id === DEV_ORG_ID)).toBe(true);
     });
 
     it('S.16 audit event integration_event_created is written', async () => {

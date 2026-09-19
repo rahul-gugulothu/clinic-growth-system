@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { Pool } from 'pg';
 import request from 'supertest';
 import { BadRequestError, NotFoundError, ForbiddenError } from '../src/types/index.js';
@@ -15,6 +15,20 @@ import {
   approveExecution,
   rejectExecution,
 } from '../src/services/aiTools.js';
+import { getIntegrationEvent, processIntegrationEvent } from '../src/services/integrations.js';
+import { setIntegrationConfig } from '../src/services/integrationConfigs.js';
+import { httpRequest } from '../src/utils/httpClient.js';
+
+vi.mock('../src/utils/httpClient.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/utils/httpClient.js')>();
+  return { ...actual, httpRequest: vi.fn() };
+});
+
+const mockedHttpRequest = vi.mocked(httpRequest);
+
+const SENDGRID_PROVIDER = 'sendgrid';
+const TEST_API_KEY = 'SG.test.key.123';
+const TEST_FROM_EMAIL = 'from@example.com';
 
 const DEV_ORG_ID = '00000000-0000-0000-0000-000000000001';
 const DEV_PROSPECT_ID = '00000000-0000-0000-0000-000000000010';
@@ -1521,6 +1535,229 @@ describe('V3.1.0-B AI Tools', () => {
           { prospectId: DEV_PROSPECT_ID }
         )
       ).rejects.toThrow(NotFoundError);
+    });
+  });
+
+  // ==================================================================
+  // Q2. APPROVAL → INTEGRATION EVENT BRIDGE (C3-B)
+  // ==================================================================
+
+  describe('Q2. Approval → Integration Event Bridge (C3-B)', () => {
+    const EMAIL_SENDER = 'dr.anaya.kaya@example.com';
+
+    const approveDraftEmail = async (prospectId = DEV_PROSPECT_ID) => {
+      const exec = await executeTool(
+        'draft-email', DEV_ORG_ID, DEV_FOUNDER_ID, null, { prospectId }
+      );
+      const approved = await approveExecution({
+        executionId: exec.id,
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        userRole: 'founder',
+        clinicId: null,
+      });
+      return { exec, approved };
+    };
+
+    const seedSendGridConfig = async () => {
+      await setIntegrationConfig({
+        organizationId: DEV_ORG_ID, provider: SENDGRID_PROVIDER,
+        configKey: 'api_key', value: TEST_API_KEY,
+      });
+      await setIntegrationConfig({
+        organizationId: DEV_ORG_ID, provider: SENDGRID_PROVIDER,
+        configKey: 'from_email', value: TEST_FROM_EMAIL,
+      });
+    };
+
+    const getEmailEventFor = async (executionId: string) => {
+      const rows = await query(
+        `SELECT * FROM integration_events
+         WHERE ai_execution_id = $1 AND provider = 'sendgrid' AND event_type = 'email.send'`,
+        [executionId]
+      );
+      return rows.rows;
+    };
+
+    beforeEach(() => {
+      mockedHttpRequest.mockReset();
+    });
+
+    it('C3-B.1 approved draft-email creates exactly one integration event', async () => {
+      const { exec } = await approveDraftEmail();
+      const events = await getEmailEventFor(exec.id);
+      expect(events).toHaveLength(1);
+    });
+
+    it('C3-B.2 event organization_id is correct', async () => {
+      const { exec } = await approveDraftEmail();
+      const events = await getEmailEventFor(exec.id);
+      expect(events[0].organization_id).toBe(DEV_ORG_ID);
+    });
+
+    it('C3-B.3 event ai_execution_id is correct', async () => {
+      const { exec } = await approveDraftEmail();
+      const events = await getEmailEventFor(exec.id);
+      expect(events[0].ai_execution_id).toBe(exec.id);
+    });
+
+    it('C3-B.4 event provider is "sendgrid"', async () => {
+      const { exec } = await approveDraftEmail();
+      const events = await getEmailEventFor(exec.id);
+      expect(events[0].provider).toBe('sendgrid');
+    });
+
+    it('C3-B.5 event_type is "email.send"', async () => {
+      const { exec } = await approveDraftEmail();
+      const events = await getEmailEventFor(exec.id);
+      expect(events[0].event_type).toBe('email.send');
+    });
+
+    it('C3-B.6 event starts with status "pending"', async () => {
+      const { exec } = await approveDraftEmail();
+      const events = await getEmailEventFor(exec.id);
+      expect(events[0].status).toBe('pending');
+    });
+
+    it('C3-B.7 payload contains exactly to/subject/body/body_type', async () => {
+      const { exec } = await approveDraftEmail();
+      const events = await getEmailEventFor(exec.id);
+      const payload = events[0].payload;
+      expect(Object.keys(payload).sort()).toEqual(['body', 'body_type', 'subject', 'to']);
+      expect(payload.to).toBe(EMAIL_SENDER);
+    });
+
+    it('C3-B.8 payload does NOT contain api_key/Authorization/reasoning/recipient/draftText', async () => {
+      const { exec } = await approveDraftEmail();
+      const events = await getEmailEventFor(exec.id);
+      const payload = events[0].payload;
+      const serialized = JSON.stringify(payload);
+      expect(serialized).not.toContain('api_key');
+      expect(serialized).not.toContain('Authorization');
+      expect(serialized).not.toContain('Bearer');
+      expect(serialized).not.toContain('config_value_encrypted');
+      expect(payload).not.toHaveProperty('reasoning');
+      expect(payload).not.toHaveProperty('recipient');
+      expect(payload).not.toHaveProperty('draftText');
+    });
+
+    it('C3-B.9 rejected draft-email creates no event', async () => {
+      const exec = await executeTool(
+        'draft-email', DEV_ORG_ID, DEV_FOUNDER_ID, null, { prospectId: DEV_PROSPECT_ID }
+      );
+      await rejectExecution({
+        executionId: exec.id, organizationId: DEV_ORG_ID, userId: DEV_FOUNDER_ID,
+        userRole: 'founder', reason: 'Not relevant', clinicId: null,
+      });
+      const events = await getEmailEventFor(exec.id);
+      expect(events).toHaveLength(0);
+    });
+
+    it('C3-B.10 approval of a read-only tool creates no event', async () => {
+      const exec = await executeTool('priority-clinics', DEV_ORG_ID, DEV_FOUNDER_ID, null, {});
+      await expect(
+        approveExecution({
+          executionId: exec.id, organizationId: DEV_ORG_ID, userId: DEV_FOUNDER_ID,
+          userRole: 'founder', clinicId: null,
+        })
+      ).rejects.toThrow(BadRequestError);
+      const events = await getEmailEventFor(exec.id);
+      expect(events).toHaveLength(0);
+    });
+
+    it('C3-B.11 approval of draft-whatsapp creates no SendGrid event', async () => {
+      const exec = await executeTool(
+        'draft-whatsapp', DEV_ORG_ID, DEV_FOUNDER_ID, null, { prospectId: DEV_PROSPECT_ID }
+      );
+      await approveExecution({
+        executionId: exec.id, organizationId: DEV_ORG_ID, userId: DEV_FOUNDER_ID,
+        userRole: 'founder', clinicId: null,
+      });
+      const events = await getEmailEventFor(exec.id);
+      expect(events).toHaveLength(0);
+    });
+
+    it('C3-B.12 second approval is rejected and creates no duplicate event', async () => {
+      const { exec } = await approveDraftEmail();
+      await expect(
+        approveExecution({
+          executionId: exec.id, organizationId: DEV_ORG_ID, userId: DEV_FOUNDER_ID,
+          userRole: 'founder', clinicId: null,
+        })
+      ).rejects.toThrow(BadRequestError);
+      const events = await getEmailEventFor(exec.id);
+      expect(events).toHaveLength(1);
+    });
+
+    it('C3-B.13 invalid/missing structured email result fails safely', async () => {
+      const exec = await executeTool(
+        'draft-email', DEV_ORG_ID, DEV_FOUNDER_ID, null, { prospectId: DEV_PROSPECT_ID }
+      );
+      // Overwrite result_output with the legacy shape lacking to/subject/body/body_type.
+      await query(
+        `UPDATE ai_tool_executions
+         SET result_output = $1
+         WHERE id = $2`,
+        [JSON.stringify({
+          channel: 'Email',
+          recipient: `${exec.id.split('-')[0]}`,
+          draftText: 'Subject: Legacy\n\nLegacy body',
+          reasoning: 'legacy',
+        }), exec.id]
+      );
+
+      await expect(
+        approveExecution({
+          executionId: exec.id, organizationId: DEV_ORG_ID, userId: DEV_FOUNDER_ID,
+          userRole: 'founder', clinicId: null,
+        })
+      ).rejects.toThrow(BadRequestError);
+
+      const events = await getEmailEventFor(exec.id);
+      expect(events).toHaveLength(0);
+    });
+
+    it('C3-B.14 organization isolation remains enforced', async () => {
+      const { exec } = await approveDraftEmail();
+      const events = await getEmailEventFor(exec.id);
+      const eventId = events[0].id;
+
+      const foreign = await getIntegrationEvent({ eventId, organizationId: ORG_B_ID });
+      expect(foreign).toBeNull();
+    });
+
+    it('C3-B.15 resulting event can be retrieved through the existing integration-event service', async () => {
+      const { exec } = await approveDraftEmail();
+      const events = await getEmailEventFor(exec.id);
+      const eventId = events[0].id;
+
+      const fetched = await getIntegrationEvent({ eventId, organizationId: DEV_ORG_ID });
+      expect(fetched).not.toBeNull();
+      expect(fetched!.provider).toBe('sendgrid');
+      expect(fetched!.event_type).toBe('email.send');
+      expect(fetched!.ai_execution_id).toBe(exec.id);
+    });
+
+    it('C3-B.16 resulting event can be processed via processIntegrationEvent (mocked SendGrid)', async () => {
+      await seedSendGridConfig();
+      mockedHttpRequest.mockResolvedValue({
+        status: 202,
+        ok: true,
+        headers: { get: (name: string) => (name.toLowerCase() === 'x-message-id' ? 'sg-123' : null) },
+      });
+
+      const { exec } = await approveDraftEmail();
+      const events = await getEmailEventFor(exec.id);
+      const eventId = events[0].id;
+
+      const updated = await processIntegrationEvent({
+        eventId, organizationId: DEV_ORG_ID, userId: DEV_FOUNDER_ID, clinicId: null,
+      });
+
+      expect(updated.status).toBe('sent');
+      expect(updated.error_message).toBeNull();
+      expect(mockedHttpRequest).toHaveBeenCalledTimes(1);
+      expect(mockedHttpRequest.mock.calls[0][0]).toBe('https://api.sendgrid.com/v3/mail/send');
     });
   });
 

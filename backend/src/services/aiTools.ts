@@ -8,6 +8,7 @@ import {
   type UserRole,
 } from '../types/index.js';
 import { logAuditEvent } from './audit.js';
+import { createIntegrationEvent } from './integrations.js';
 import { logger } from '../utils/logger.js';
 import type {
   AiToolDefinition,
@@ -341,6 +342,39 @@ const enforceApproverRole = (role: UserRole): void => {
   }
 };
 
+// V3.1.2-C3-B: canonical machine-readable email payload that the approval
+// bridge copies verbatim from a draft-email execution's result_output into a
+// SendGrid integration event. Only these four keys may enter an event payload.
+const draftEmailIntegrationPayloadSchema = z.object({
+  to: z.string().email(),
+  subject: z.string().min(1),
+  body: z.string().min(1),
+  body_type: z.enum(['text', 'html']),
+});
+
+const buildDraftEmailIntegrationPayload = (
+  record: AiToolExecutionRecord
+): Record<string, unknown> => {
+  const output = record.result_output ?? {};
+  const parsed = draftEmailIntegrationPayloadSchema.safeParse({
+    to: output.to,
+    subject: output.subject,
+    body: output.body,
+    body_type: output.body_type,
+  });
+  if (!parsed.success) {
+    throw new BadRequestError(
+      `Draft email result missing or invalid structured email output: ${parsed.error.issues.map((i) => i.message).join(', ')}`
+    );
+  }
+  return {
+    to: parsed.data.to,
+    subject: parsed.data.subject,
+    body: parsed.data.body,
+    body_type: parsed.data.body_type,
+  };
+};
+
 export const approveExecution = async (
   params: ApproveExecutionParams
 ): Promise<AiToolExecutionRecord> => {
@@ -411,6 +445,23 @@ export const approveExecution = async (
         approved_by: params.userId,
       },
     });
+
+    // V3.1.2-C3-B: bridge approved draft-email executions to the integration
+    // event system. Only draft-email actions create a SendGrid email event;
+    // other approvals leave the integration system untouched. Event creation
+    // uses its own client/transaction (see §7 atomicity limitation).
+    if (record.tool_id === 'draft-email' && record.requires_human_review) {
+      const payload = buildDraftEmailIntegrationPayload(record);
+      await createIntegrationEvent({
+        executionId: record.id,
+        organizationId: record.organization_id,
+        userId: params.userId,
+        clinicId: record.clinic_id,
+        provider: 'sendgrid',
+        eventType: 'email.send',
+        payload,
+      });
+    }
 
     return record;
   } finally {
