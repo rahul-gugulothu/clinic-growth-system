@@ -5,10 +5,10 @@ import { BadRequestError, NotFoundError, ForbiddenError, INTERNAL_ROLES } from '
 import {
   listTools,
   executeTool,
-  getExecutionResult,
+  getExecutionWithIntegrationStatus,
   approveExecution,
   rejectExecution,
-  listExecutions,
+  listExecutionsWithIntegrationStatus,
   type AiExecutionFilter,
 } from '../services/aiTools.js';
 import type { AiToolDefinition } from '../types/aiTools.js';
@@ -129,7 +129,7 @@ router.get(
         filter.offset = parsed.data.offset;
       }
 
-      const result = await listExecutions(auth.organizationId, filter);
+      const result = await listExecutionsWithIntegrationStatus(auth.organizationId, filter);
 
       res.json(result);
     } catch (err) {
@@ -152,7 +152,7 @@ router.get('/:id', async (req: Request, res: Response, next: NextFunction) => {
       return;
     }
 
-    const execution = await getExecutionResult(idResult.data, auth.organizationId);
+    const execution = await getExecutionWithIntegrationStatus(idResult.data, auth.organizationId);
     if (!execution) {
       throw new NotFoundError('Execution not found');
     }

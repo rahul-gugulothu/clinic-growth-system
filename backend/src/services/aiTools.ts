@@ -8,7 +8,7 @@ import {
   type UserRole,
 } from '../types/index.js';
 import { logAuditEvent } from './audit.js';
-import { createIntegrationEvent } from './integrations.js';
+import { createIntegrationEvent, getExecutionEvents } from './integrations.js';
 import { logger } from '../utils/logger.js';
 import type {
   AiToolDefinition,
@@ -17,7 +17,14 @@ import type {
   AiExecutionStatus,
   AiToolExecutionRecord,
   AiToolExecutionResult,
+  AiExecutionWithIntegration,
+  AiExecutionWithDeliveryStatus,
+  IntegrationDeliveryEvent,
 } from '../types/aiTools.js';
+import type {
+  IntegrationEventStatus,
+  IntegrationEventRecord,
+} from '../types/integrations.js';
 import { priorityClinicsTool } from './aiTools/priorityClinics.js';
 import { prospectSummaryTool } from './aiTools/prospectSummary.js';
 import { pipelineDiagnosisTool } from './aiTools/pipelineDiagnosis.js';
@@ -89,6 +96,16 @@ export interface AiExecutionListResponse {
   };
 }
 
+export interface AiExecutionListWithDelivery {
+  executions: AiExecutionWithDeliveryStatus[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    hasMore: boolean;
+  };
+}
+
 export const listExecutions = async (
   organizationId: string,
   filter: AiExecutionFilter
@@ -135,6 +152,92 @@ export const listExecutions = async (
         total,
         hasMore: offset + (dataResult.rowCount ?? 0) < total,
       },
+    };
+  } finally {
+    client.release();
+  }
+};
+
+const toDeliveryEvent = (
+  event: IntegrationEventRecord
+): IntegrationDeliveryEvent => ({
+  provider: event.provider,
+  event_type: event.event_type,
+  status: event.status,
+  retry_count: event.retry_count,
+  error_message: event.error_message,
+  next_retry_at: event.next_retry_at,
+  sent_at: event.sent_at,
+});
+
+export const getExecutionWithIntegrationStatus = async (
+  executionId: string,
+  organizationId: string
+): Promise<AiExecutionWithIntegration | null> => {
+  const execution = await getExecutionResult(executionId, organizationId);
+  if (!execution) return null;
+
+  const events = await getExecutionEvents({
+    executionId,
+    organizationId,
+  });
+
+  return {
+    ...execution,
+    integration_events: events.map(toDeliveryEvent),
+  };
+};
+
+export const listExecutionsWithIntegrationStatus = async (
+  organizationId: string,
+  filter: AiExecutionFilter
+): Promise<AiExecutionListWithDelivery> => {
+  const baseResult = await listExecutions(organizationId, filter);
+
+  if (baseResult.executions.length === 0) {
+    return {
+      executions: [],
+      pagination: baseResult.pagination,
+    };
+  }
+
+  const executionIds = baseResult.executions.map((e) => e.id);
+
+  const client = await getClient();
+  try {
+    const statusResult = await client.query<{
+      ai_execution_id: string;
+      latest_status: IntegrationEventStatus;
+    }>(
+      `SELECT DISTINCT ON (ai_execution_id)
+         ai_execution_id,
+         status AS latest_status
+       FROM integration_events
+       WHERE ai_execution_id = ANY($1)
+         AND organization_id = $2
+       ORDER BY ai_execution_id, created_at DESC`,
+      [executionIds, organizationId]
+    );
+
+    const statusMap = new Map<string, IntegrationEventStatus>();
+    for (const row of statusResult.rows) {
+      if (row.ai_execution_id && row.latest_status) {
+        statusMap.set(row.ai_execution_id, row.latest_status);
+      }
+    }
+
+    const executions = baseResult.executions.map((exec) => {
+      const latest = statusMap.get(exec.id);
+      return {
+        ...exec,
+        latest_integration_status: latest ?? null,
+        has_integration_events: latest !== undefined,
+      };
+    });
+
+    return {
+      executions,
+      pagination: baseResult.pagination,
     };
   } finally {
     client.release();

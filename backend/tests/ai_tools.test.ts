@@ -2634,5 +2634,431 @@ describe('V3.1.0-B AI Tools', () => {
         expect(result.body.execution.status).toBe('rejected');
       });
     });
+
+    // ==================================================================
+    // V3.1.4-B: AI Execution Delivery Status
+    // ==================================================================
+
+    describe('V3.1.4-B AI Execution Delivery Status', () => {
+      const approveDraftEmail = async (prospectId = DEV_PROSPECT_ID) => {
+        const exec = await executeTool(
+          'draft-email', DEV_ORG_ID, DEV_FOUNDER_ID, null, { prospectId }
+        );
+        const approved = await approveExecution({
+          executionId: exec.id,
+          organizationId: DEV_ORG_ID,
+          userId: DEV_FOUNDER_ID,
+          userRole: 'founder',
+          clinicId: null,
+        });
+        return { exec, approved };
+      };
+
+      const seedSendGridConfig = async () => {
+        await setIntegrationConfig({
+          organizationId: DEV_ORG_ID, provider: SENDGRID_PROVIDER,
+          configKey: 'api_key', value: TEST_API_KEY,
+        });
+        await setIntegrationConfig({
+          organizationId: DEV_ORG_ID, provider: SENDGRID_PROVIDER,
+          configKey: 'from_email', value: TEST_FROM_EMAIL,
+        });
+      };
+
+      const getEventsFor = async (executionId: string) => {
+        const rows = await query(
+          `SELECT * FROM integration_events
+           WHERE ai_execution_id = $1
+           ORDER BY created_at ASC`,
+          [executionId]
+        );
+        return rows.rows;
+      };
+
+      beforeEach(() => {
+        mockedHttpRequest.mockReset();
+      });
+
+      // A. Execution detail with no integration events
+      it('A. execution detail with no integration events returns empty array', async () => {
+        const execResult = await executeTool(
+          'priority-clinics', DEV_ORG_ID, DEV_FOUNDER_ID, null, {}
+        );
+
+        const result = await request(app)
+          .get(`/api/v1/ai/${execResult.id}`)
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        expect(result.status).toBe(200);
+        expect(result.body.execution.id).toBe(execResult.id);
+        expect(result.body.execution.integration_events).toEqual([]);
+      });
+
+      // B. Execution detail with linked event
+      it('B. execution detail after approval shows integration event with safe fields', async () => {
+        const { exec } = await approveDraftEmail();
+
+        const result = await request(app)
+          .get(`/api/v1/ai/${exec.id}`)
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        expect(result.status).toBe(200);
+        expect(result.body.execution.integration_events).toHaveLength(1);
+
+        const event = result.body.execution.integration_events[0];
+        expect(event).toHaveProperty('provider');
+        expect(event).toHaveProperty('event_type');
+        expect(event).toHaveProperty('status');
+        expect(event).toHaveProperty('retry_count');
+        expect(event).toHaveProperty('error_message');
+        expect(event).toHaveProperty('next_retry_at');
+        expect(event).toHaveProperty('sent_at');
+
+        expect(event.provider).toBe('sendgrid');
+        expect(event.event_type).toBe('email.send');
+        expect(event.status).toBe('pending');
+        expect(event.retry_count).toBe(0);
+      });
+
+      // C. Execution detail does not expose secrets/internal config
+      it('C. execution detail does not expose secrets or internal config', async () => {
+        await seedSendGridConfig();
+
+        const { exec } = await approveDraftEmail();
+
+        const result = await request(app)
+          .get(`/api/v1/ai/${exec.id}`)
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        const serialized = JSON.stringify(result.body);
+        expect(serialized).not.toContain(TEST_API_KEY);
+        expect(serialized).not.toContain('config_value_encrypted');
+        expect(serialized).not.toContain('Authorization');
+        expect(serialized).not.toContain('Bearer SG');
+      });
+
+      // D. Execution detail organization isolation still works
+      it('D. execution detail returns 404 for cross-org access', async () => {
+        const execResult = await executeTool(
+          'priority-clinics', DEV_ORG_ID, DEV_FOUNDER_ID, null, {}
+        );
+
+        const result = await request(app)
+          .get(`/api/v1/ai/${execResult.id}`)
+          .set('Authorization', `Bearer ${userBToken}`);
+
+        expect(result.status).toBe(404);
+      });
+
+      // E. Execution list without integration events
+      it('E. execution list shows null status and false has_integration_events for executions without events', async () => {
+        const execResult = await executeTool(
+          'priority-clinics', DEV_ORG_ID, DEV_FOUNDER_ID, null, {}
+        );
+
+        const result = await request(app)
+          .get('/api/v1/ai/executions')
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        expect(result.status).toBe(200);
+        const item = result.body.executions.find(
+          (e: { id: string }) => e.id === execResult.id
+        );
+        expect(item).toBeDefined();
+        expect(item!.latest_integration_status).toBeNull();
+        expect(item!.has_integration_events).toBe(false);
+      });
+
+      // F. Execution list with linked event
+      it('F. execution list shows latest_integration_status and has_integration_events for approved execution', async () => {
+        const { exec } = await approveDraftEmail();
+
+        const result = await request(app)
+          .get('/api/v1/ai/executions')
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        expect(result.status).toBe(200);
+        const item = result.body.executions.find(
+          (e: { id: string }) => e.id === exec.id
+        );
+        expect(item).toBeDefined();
+        expect(item!.has_integration_events).toBe(true);
+        expect(item!.latest_integration_status).toBe('pending');
+      });
+
+      // G. Multiple integration events — newest by created_at wins
+      it('G. latest_integration_status reflects newest event by created_at, not insertion order', async () => {
+        const execResult = await executeTool(
+          'priority-clinics', DEV_ORG_ID, DEV_FOUNDER_ID, null, {}
+        );
+
+        // Insert an older event with status 'sent' and an older created_at
+        await query(
+          `INSERT INTO integration_events
+             (organization_id, clinic_id, ai_execution_id, provider, event_type, payload, status, retry_count, sent_at, created_at, updated_at)
+           VALUES ($1, NULL, $2, 'provider-test', 'test-event', '{}', 'sent', 0, NOW(), NOW() - INTERVAL '1 hour', NOW())`,
+          [DEV_ORG_ID, execResult.id]
+        );
+
+        // Insert a newer event with status 'failed' and a newer created_at
+        await query(
+          `INSERT INTO integration_events
+             (organization_id, clinic_id, ai_execution_id, provider, event_type, payload, status, retry_count, error_message, created_at, updated_at)
+           VALUES ($1, NULL, $2, 'provider-test', 'test-event-2', '{}', 'failed', 2, 'Mock failure', NOW(), NOW())`,
+          [DEV_ORG_ID, execResult.id]
+        );
+
+        const detailResult = await request(app)
+          .get(`/api/v1/ai/${execResult.id}`)
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        expect(detailResult.status).toBe(200);
+        expect(detailResult.body.execution.integration_events).toHaveLength(2);
+
+        const listResult = await request(app)
+          .get('/api/v1/ai/executions')
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        expect(listResult.status).toBe(200);
+        const listItem = listResult.body.executions.find(
+          (e: { id: string }) => e.id === execResult.id
+        );
+        expect(listItem).toBeDefined();
+        expect(listItem!.has_integration_events).toBe(true);
+        expect(listItem!.latest_integration_status).toBe('failed');
+      });
+
+      // H. Integration status transitions
+      it('H.1 latest_integration_status is "pending" after approval', async () => {
+        const { exec } = await approveDraftEmail();
+
+        const result = await request(app)
+          .get(`/api/v1/ai/${exec.id}`)
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        const event = result.body.execution.integration_events[0];
+        expect(event.status).toBe('pending');
+      });
+
+      it('H.2 latest_integration_status transitions to "sent" via processIntegrationEvent', async () => {
+        await seedSendGridConfig();
+        mockedHttpRequest.mockResolvedValue({
+          status: 202,
+          ok: true,
+          headers: { get: (name: string) => (name.toLowerCase() === 'x-message-id' ? 'sg-123' : null) },
+        });
+
+        const { exec } = await approveDraftEmail();
+
+        const events = await getEventsFor(exec.id);
+        await processIntegrationEvent({
+          eventId: events[0].id,
+          organizationId: DEV_ORG_ID,
+          userId: DEV_FOUNDER_ID,
+          clinicId: null,
+        });
+
+        const detailResult = await request(app)
+          .get(`/api/v1/ai/${exec.id}`)
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        const listResult = await request(app)
+          .get('/api/v1/ai/executions')
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        const listItem = listResult.body.executions.find(
+          (e: { id: string }) => e.id === exec.id
+        );
+        expect(listItem!.latest_integration_status).toBe('sent');
+
+        const detailEvent = detailResult.body.execution.integration_events[0];
+        expect(detailEvent.status).toBe('sent');
+      });
+
+      it('H.3 latest_integration_status transitions to "failed" on provider failure', async () => {
+        await seedSendGridConfig();
+        mockedHttpRequest.mockResolvedValue({
+          status: 500,
+          ok: false,
+          headers: { get: () => null },
+        });
+
+        const { exec } = await approveDraftEmail();
+
+        // Process to consume all retries until failure.
+        // Between retry iterations, move next_retry_at back to the past
+        // so the event remains executable (processIntegrationEvent sets it
+        // to now + backoff on each failed attempt).
+        for (let i = 0; i < 10; i++) {
+          const currentEvents = await getEventsFor(exec.id);
+          const currentStatus = currentEvents[0].status;
+          if (currentStatus === 'sent' || currentStatus === 'failed') break;
+
+          if (currentStatus === 'retry') {
+            await query(
+              `UPDATE integration_events
+                 SET next_retry_at = NOW() - INTERVAL '1 hour'
+               WHERE id = $1`,
+              [currentEvents[0].id]
+            );
+          }
+
+          await processIntegrationEvent({
+            eventId: currentEvents[0].id,
+            organizationId: DEV_ORG_ID,
+            userId: DEV_FOUNDER_ID,
+            clinicId: null,
+          });
+        }
+
+        const listResult = await request(app)
+          .get('/api/v1/ai/executions')
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        const listItem = listResult.body.executions.find(
+          (e: { id: string }) => e.id === exec.id
+        );
+        expect(listItem!.latest_integration_status).toBe('failed');
+      });
+
+      it('H.4 latest_integration_status can be "retry"', async () => {
+        const execResult = await executeTool(
+          'draft-email', DEV_ORG_ID, DEV_FOUNDER_ID, null, { prospectId: DEV_PROSPECT_ID }
+        );
+        await approveExecution({
+          executionId: execResult.id,
+          organizationId: DEV_ORG_ID,
+          userId: DEV_FOUNDER_ID,
+          userRole: 'founder',
+          clinicId: null,
+        });
+
+        // Update the pending event to 'retry' status directly
+        await query(
+          `UPDATE integration_events
+           SET status = 'retry',
+               retry_count = 1,
+               error_message = 'Temporary failure',
+               next_retry_at = $1,
+               updated_at = NOW()
+           WHERE ai_execution_id = $2`,
+          [new Date(Date.now() + 60000).toISOString(), execResult.id]
+        );
+
+        const result = await request(app)
+          .get('/api/v1/ai/executions')
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        const listItem = result.body.executions.find(
+          (e: { id: string }) => e.id === execResult.id
+        );
+        expect(listItem!.latest_integration_status).toBe('retry');
+      });
+
+      // I. Existing filters still work with enriched response
+      it('I.1 tool_id filter works with integration enrichment', async () => {
+        await approveDraftEmail();
+
+        const result = await request(app)
+          .get('/api/v1/ai/executions?tool_id=draft-email')
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        expect(result.status).toBe(200);
+        for (const item of result.body.executions) {
+          expect(item.tool_id).toBe('draft-email');
+          expect(item).toHaveProperty('latest_integration_status');
+          expect(item).toHaveProperty('has_integration_events');
+        }
+      });
+
+      it('I.2 limit and offset still work with integration enrichment', async () => {
+        const result = await request(app)
+          .get('/api/v1/ai/executions?limit=5&offset=5')
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        expect(result.status).toBe(200);
+        expect(result.body.pagination.limit).toBe(5);
+        expect(result.body.pagination.page).toBe(2);
+        expect(result.body.executions.length).toBeLessThanOrEqual(5);
+      });
+
+      it('I.3 pagination metadata preserved with enrichment', async () => {
+        const result = await request(app)
+          .get('/api/v1/ai/executions')
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        expect(result.status).toBe(200);
+        expect(result.body.pagination).toBeDefined();
+        expect(result.body.pagination.total).toBeGreaterThan(0);
+      });
+
+      // J. Organization isolation
+      it('J.1 another organization never sees our executions or integration events', async () => {
+        await approveDraftEmail();
+
+        const result = await request(app)
+          .get('/api/v1/ai/executions')
+          .set('Authorization', `Bearer ${userBToken}`);
+
+        expect(result.status).toBe(200);
+        for (const item of result.body.executions) {
+          expect(item.organization_id).toBe(ORG_B_ID);
+          expect(item.latest_integration_status).toBeNull();
+        }
+      });
+
+      it('J.2 cross-org execution detail returns 404 with integration events', async () => {
+        const { exec } = await approveDraftEmail();
+
+        const result = await request(app)
+          .get(`/api/v1/ai/${exec.id}`)
+          .set('Authorization', `Bearer ${userBToken}`);
+
+        expect(result.status).toBe(404);
+      });
+
+      // K. Existing AI routes regressions
+      it('K.1 GET /api/v1/ai/:id still works for execution without events', async () => {
+        const execResult = await executeTool(
+          'priority-clinics', DEV_ORG_ID, DEV_FOUNDER_ID, null, {}
+        );
+
+        const result = await request(app)
+          .get(`/api/v1/ai/${execResult.id}`)
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        expect(result.status).toBe(200);
+        expect(result.body.execution.id).toBe(execResult.id);
+        expect(result.body.execution.tool_id).toBe('priority-clinics');
+        expect(result.body.execution.integration_events).toEqual([]);
+      });
+
+      it('K.2 POST /api/v1/ai/:id/approve still works', async () => {
+        const execResult = await executeTool(
+          'draft-email', DEV_ORG_ID, DEV_FOUNDER_ID, null, { prospectId: DEV_PROSPECT_ID }
+        );
+
+        const result = await request(app)
+          .post(`/api/v1/ai/${execResult.id}/approve`)
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        expect(result.status).toBe(200);
+        expect(result.body.execution.status).toBe('approved');
+      });
+
+      it('K.3 POST /api/v1/ai/:id/reject still works', async () => {
+        const execResult = await executeTool(
+          'draft-whatsapp', DEV_ORG_ID, DEV_FOUNDER_ID, null, { prospectId: DEV_PROSPECT_ID }
+        );
+
+        const result = await request(app)
+          .post(`/api/v1/ai/${execResult.id}/reject`)
+          .set('Authorization', `Bearer ${founderToken}`)
+          .send({ reason: 'Test rejection' });
+
+        expect(result.status).toBe(200);
+        expect(result.body.execution.status).toBe('rejected');
+      });
+    });
   });
 });

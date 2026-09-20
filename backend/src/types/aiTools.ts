@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import type { IntegrationEventStatus } from './integrations.js';
 
 export type AiExecutionStatus =
   | 'requested'
@@ -75,4 +76,25 @@ export interface AiToolExecutionResult {
   completed_at: string | null;
   approved_by: string | null;
   approved_at: string | null;
+}
+
+export interface IntegrationDeliveryEvent {
+  provider: string;
+  event_type: string;
+  status: IntegrationEventStatus;
+  retry_count: number;
+  error_message: string | null;
+  next_retry_at: string | null;
+  sent_at: string | null;
+}
+
+export interface AiExecutionWithIntegration
+  extends AiToolExecutionRecord {
+  integration_events: IntegrationDeliveryEvent[];
+}
+
+export interface AiExecutionWithDeliveryStatus
+  extends AiToolExecutionRecord {
+  latest_integration_status: IntegrationEventStatus | null;
+  has_integration_events: boolean;
 }
