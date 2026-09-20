@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { Pool } from 'pg';
 import request from 'supertest';
 import { BadRequestError, NotFoundError, ForbiddenError } from '../src/types/index.js';
@@ -2329,6 +2329,310 @@ describe('V3.1.0-B AI Tools', () => {
       expect(result.status).toBe(200);
       expect(result.body.execution.id).toBe(readOnlyExecutionId);
       expect(result.body.execution.organization_id).toBe(DEV_ORG_ID);
+    });
+  });
+
+  // ==================================================================
+  // V3.1.4-A: AI Tool Execution API route tests
+  // ==================================================================
+
+  describe('V3.1.4-A AI Tool Execution API', () => {
+    afterEach(() => {
+      mockedHttpRequest.mockReset();
+    });
+
+    describe('GET /api/v1/ai/tools', () => {
+      it('returns 401 without JWT', async () => {
+        const result = await request(app).get('/api/v1/ai/tools');
+        expect(result.status).toBe(401);
+      });
+
+      it('returns 200 for authenticated user', async () => {
+        const result = await request(app)
+          .get('/api/v1/ai/tools')
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        expect(result.status).toBe(200);
+        expect(result.body.tools).toBeInstanceOf(Array);
+        expect(result.body.tools).toHaveLength(11);
+      });
+
+      it('returns public tool fields without internal implementation details', () => {
+        return new Promise<void>((resolve) => {
+          request(app)
+            .get('/api/v1/ai/tools')
+            .set('Authorization', `Bearer ${founderToken}`)
+            .end((_err, res) => {
+              const first = res.body.tools[0];
+              expect(first).toHaveProperty('id');
+              expect(first).toHaveProperty('name');
+              expect(first).toHaveProperty('description');
+              expect(first).toHaveProperty('tenant_scope');
+              expect(first).toHaveProperty('required_context');
+              expect(first).toHaveProperty('human_review_required');
+              expect(first).not.toHaveProperty('context_schema');
+              expect(first).not.toHaveProperty('execute');
+              resolve();
+            });
+        });
+      });
+
+      it('does not expose secrets or internal fields', () => {
+        return new Promise<void>((resolve) => {
+          request(app)
+            .get('/api/v1/ai/tools')
+            .set('Authorization', `Bearer ${founderToken}`)
+            .end((_err, res) => {
+              const serialized = JSON.stringify(res.body);
+              expect(serialized).not.toContain('SG.test.key');
+              expect(serialized).not.toContain('password');
+              expect(serialized).not.toContain('api_key');
+              resolve();
+            });
+        });
+      });
+    });
+
+    describe('POST /api/v1/ai/tools/:toolId', () => {
+      it('returns 401 without JWT', async () => {
+        const result = await request(app)
+          .post('/api/v1/ai/tools/priority-clinics')
+          .send({ context: {} });
+
+        expect(result.status).toBe(401);
+      });
+
+      it('valid authenticated execution returns 200 with execution envelope', async () => {
+        const result = await request(app)
+          .post('/api/v1/ai/tools/priority-clinics')
+          .set('Authorization', `Bearer ${founderToken}`)
+          .send({ context: {} });
+
+        expect(result.status).toBe(200);
+        expect(result.body.execution).toBeDefined();
+        expect(result.body.execution.id).toBeDefined();
+        expect(result.body.execution.tool_id).toBe('priority-clinics');
+        expect(result.body.execution.organization_id).toBe(DEV_ORG_ID);
+        expect(result.body.execution.status).toBe('completed');
+        expect(result.body.execution.requires_human_review).toBe(false);
+      });
+
+      it('invalid tool ID returns 404', async () => {
+        const result = await request(app)
+          .post('/api/v1/ai/tools/nonexistent-tool')
+          .set('Authorization', `Bearer ${founderToken}`)
+          .send({ context: {} });
+
+        expect(result.status).toBe(404);
+      });
+
+      it('missing body returns 400 for context validation', async () => {
+        const result = await request(app)
+          .post('/api/v1/ai/tools/priority-clinics')
+          .set('Authorization', `Bearer ${founderToken}`)
+          .send();
+
+        expect(result.status).toBe(200);
+      });
+
+      it('invalid context for draft-email returns 400', async () => {
+        const result = await request(app)
+          .post('/api/v1/ai/tools/draft-email')
+          .set('Authorization', `Bearer ${founderToken}`)
+          .send({ context: {} });
+
+        expect(result.status).toBe(400);
+      });
+
+      it('org-scoped tool rejected for clinic-scoped user (400)', async () => {
+        const result = await request(app)
+          .post('/api/v1/ai/tools/priority-clinics')
+          .set('Authorization', `Bearer ${clinicOwnerToken}`)
+          .send({ context: {} });
+
+        expect(result.status).toBe(400);
+      });
+
+      it('clinic-scoped tool correctly uses authenticated clinic context', async () => {
+        const result = await request(app)
+          .post('/api/v1/ai/tools/priority-clinics')
+          .set('Authorization', `Bearer ${founderToken}`)
+          .send({ context: {} });
+
+        expect(result.status).toBe(200);
+        expect(result.body.execution).toBeDefined();
+      });
+
+      it('org-scoped tool works for founder (null clinic)', async () => {
+        const result = await request(app)
+          .post('/api/v1/ai/tools/priority-clinics')
+          .set('Authorization', `Bearer ${founderToken}`)
+          .send({ context: {} });
+
+        expect(result.status).toBe(200);
+        expect(result.body.execution.status).toBe('completed');
+      });
+
+      it('draft-email tool creates requires_approval execution via route', async () => {
+        const result = await request(app)
+          .post('/api/v1/ai/tools/draft-email')
+          .set('Authorization', `Bearer ${founderToken}`)
+          .send({ context: { prospectId: DEV_PROSPECT_ID } });
+
+        expect(result.status).toBe(200);
+        expect(result.body.execution.status).toBe('requires_approval');
+        expect(result.body.execution.requires_human_review).toBe(true);
+      });
+
+      it('service error (tool execution failure) maps to API error', async () => {
+        const result = await request(app)
+          .post('/api/v1/ai/tools/draft-email')
+          .set('Authorization', `Bearer ${founderToken}`)
+          .send({ context: { prospectId: INVALID_UUID } });
+
+        expect(result.status).toBe(404);
+      });
+    });
+
+    describe('GET /api/v1/ai/executions', () => {
+      it('returns 401 without JWT', async () => {
+        const result = await request(app).get('/api/v1/ai/executions');
+        expect(result.status).toBe(401);
+      });
+
+      it('returns only the caller organization executions', async () => {
+        const result = await request(app)
+          .get('/api/v1/ai/executions')
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        expect(result.status).toBe(200);
+        expect(result.body.executions).toBeInstanceOf(Array);
+        expect(result.body.pagination).toBeDefined();
+        expect(result.body.pagination.total).toBeGreaterThan(0);
+        for (const exec of result.body.executions) {
+          expect(exec.organization_id).toBe(DEV_ORG_ID);
+        }
+      });
+
+      it('organization_id from query string cannot override auth scope', async () => {
+        const result = await request(app)
+          .get('/api/v1/ai/executions?organization_id=' + ORG_B_ID)
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        expect(result.status).toBe(200);
+        for (const exec of result.body.executions) {
+          expect(exec.organization_id).toBe(DEV_ORG_ID);
+          expect(exec.organization_id).not.toBe(ORG_B_ID);
+        }
+      });
+
+      it('tool_id filter works', async () => {
+        await executeTool(
+          'priority-clinics',
+          DEV_ORG_ID,
+          DEV_FOUNDER_ID,
+          null,
+          {}
+        );
+
+        const result = await request(app)
+          .get('/api/v1/ai/executions?tool_id=priority-clinics')
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        expect(result.status).toBe(200);
+        for (const exec of result.body.executions) {
+          expect(exec.tool_id).toBe('priority-clinics');
+        }
+      });
+
+      it('limit query works', async () => {
+        const result = await request(app)
+          .get('/api/v1/ai/executions?limit=5')
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        expect(result.status).toBe(200);
+        expect(result.body.pagination.limit).toBe(5);
+        expect(result.body.executions.length).toBeLessThanOrEqual(5);
+      });
+
+      it('offset query works', async () => {
+        const withoutOffset = await request(app)
+          .get('/api/v1/ai/executions?limit=5')
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        const withOffset = await request(app)
+          .get('/api/v1/ai/executions?limit=5&offset=5')
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        expect(withOffset.status).toBe(200);
+        expect(withOffset.body.pagination.page).toBe(2);
+        expect(withoutOffset.body.pagination.page).toBe(1);
+      });
+
+      it('another organization executions are never returned', async () => {
+        const result = await request(app)
+          .get('/api/v1/ai/executions')
+          .set('Authorization', `Bearer ${userBToken}`);
+
+        expect(result.status).toBe(200);
+        for (const exec of result.body.executions) {
+          expect(exec.organization_id).toBe(ORG_B_ID);
+        }
+      });
+    });
+
+    describe('V3.1.4-A regression checks', () => {
+      it('existing GET /api/v1/ai/:id still works', async () => {
+        const execResult = await executeTool(
+          'priority-clinics',
+          DEV_ORG_ID,
+          DEV_FOUNDER_ID,
+          null,
+          {}
+        );
+
+        const result = await request(app)
+          .get(`/api/v1/ai/${execResult.id}`)
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        expect(result.status).toBe(200);
+        expect(result.body.execution.id).toBe(execResult.id);
+      });
+
+      it('existing POST /api/v1/ai/:id/approve still works', async () => {
+        const execResult = await executeTool(
+          'draft-email',
+          DEV_ORG_ID,
+          DEV_FOUNDER_ID,
+          null,
+          { prospectId: DEV_PROSPECT_ID }
+        );
+
+        const result = await request(app)
+          .post(`/api/v1/ai/${execResult.id}/approve`)
+          .set('Authorization', `Bearer ${founderToken}`);
+
+        expect(result.status).toBe(200);
+        expect(result.body.execution.status).toBe('approved');
+      });
+
+      it('existing POST /api/v1/ai/:id/reject still works', async () => {
+        const execResult = await executeTool(
+          'draft-whatsapp',
+          DEV_ORG_ID,
+          DEV_FOUNDER_ID,
+          null,
+          { prospectId: DEV_PROSPECT_ID }
+        );
+
+        const result = await request(app)
+          .post(`/api/v1/ai/${execResult.id}/reject`)
+          .set('Authorization', `Bearer ${founderToken}`)
+          .send({ reason: 'Test rejection' });
+
+        expect(result.status).toBe(200);
+        expect(result.body.execution.status).toBe('rejected');
+      });
     });
   });
 });
