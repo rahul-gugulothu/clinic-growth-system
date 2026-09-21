@@ -216,6 +216,35 @@ const start = async (): Promise<void> => {
     const result = await gracefulShutdown();
     process.exit(result.forced ? 1 : 0);
   });
+  registerProcessHandlers();
+};
+
+export const registerProcessHandlers = (): void => {
+  process.on('unhandledRejection', (reason: unknown) => {
+    logger.error(
+      {
+        event: 'integration_worker_unhandled_rejection',
+        error: reason instanceof Error ? reason.message : String(reason),
+      },
+      'Integration worker encountered an unhandled promise rejection'
+    );
+    void gracefulShutdown().then((result: ShutdownResult) => {
+      process.exit(result.forced ? 1 : 0);
+    });
+  });
+
+  process.on('uncaughtException', (err: Error) => {
+    logger.error(
+      {
+        event: 'integration_worker_uncaught_exception',
+        error: err.message,
+      },
+      'Integration worker encountered an uncaught exception'
+    );
+    void gracefulShutdown().then(() => {
+      process.exit(1);
+    });
+  });
 };
 
 if (isMainModule()) {

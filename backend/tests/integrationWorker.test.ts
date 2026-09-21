@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { Pool } from 'pg';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { createTestDatabase, type TestDatabase } from './helpers.js';
 import { setPool } from '../src/db/index.js';
 import { processDueIntegrationEvents } from '../src/services/integrations.js';
@@ -101,6 +104,8 @@ const mockLogger = {
   debug: vi.fn(),
   fatal: vi.fn(),
 };
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const loadWorkerWithMockLogger = async (
   overrides: {
@@ -697,6 +702,172 @@ describe('V3.1.3-A Integration Worker', () => {
           }
         }
       }
+    });
+  });
+
+  // ==================================================================
+  // V.1 – V.6: process error handlers (V3.1.6)
+  // ==================================================================
+
+  describe('process error handlers (V.1 - V.6)', () => {
+    beforeEach(() => {
+      process.removeAllListeners('unhandledRejection');
+      process.removeAllListeners('uncaughtException');
+    });
+
+    afterEach(() => {
+      process.removeAllListeners('unhandledRejection');
+      process.removeAllListeners('uncaughtException');
+      vi.restoreAllMocks();
+    });
+
+    it('V.1 registerProcessHandlers registers unhandledRejection and uncaughtException handlers', async () => {
+      const worker = await loadWorkerWithMockLogger({
+        processDueIntegrationEvents: vi.fn().mockResolvedValue(mockBatchResult),
+      });
+
+      process.removeAllListeners('unhandledRejection');
+      process.removeAllListeners('uncaughtException');
+
+      worker.registerProcessHandlers();
+
+      expect(process.listenerCount('unhandledRejection')).toBe(1);
+      expect(process.listenerCount('uncaughtException')).toBe(1);
+    });
+
+    it('V.2 unhandledRejection emits structured log and initiates graceful shutdown', async () => {
+      vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+
+      const worker = await loadWorkerWithMockLogger({
+        processDueIntegrationEvents: vi.fn().mockResolvedValue(mockBatchResult),
+        closePool: vi.fn().mockResolvedValue(undefined),
+      });
+
+      await worker.startWorker({ intervalMs: 10000 });
+      await new Promise((r) => setTimeout(r, 20));
+
+      worker.registerProcessHandlers();
+      mockLogger.error.mockClear();
+
+      process.emit('unhandledRejection', new Error('test rejection'), undefined as unknown as Promise<unknown>);
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      const errorCall = mockLogger.error.mock.calls.find(
+        (c) => c[0]?.event === 'integration_worker_unhandled_rejection'
+      )!;
+      expect(errorCall).toBeDefined();
+      expect(errorCall[0].error).toBe('test rejection');
+
+      expect(process.exit).toHaveBeenCalledTimes(1);
+      expect(process.exit).toHaveBeenCalledWith(0);
+
+      expect(worker.isShuttingDown()).toBe(true);
+    });
+
+    it('V.3 uncaughtException emits structured log and exits non-zero', async () => {
+      vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+
+      const worker = await loadWorkerWithMockLogger({
+        processDueIntegrationEvents: vi.fn().mockResolvedValue(mockBatchResult),
+        closePool: vi.fn().mockResolvedValue(undefined),
+      });
+
+      await worker.startWorker({ intervalMs: 10000 });
+      await new Promise((r) => setTimeout(r, 20));
+
+      worker.registerProcessHandlers();
+      mockLogger.error.mockClear();
+
+      process.emit('uncaughtException', new Error('test exception'));
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      const errorCall = mockLogger.error.mock.calls.find(
+        (c) => c[0]?.event === 'integration_worker_uncaught_exception'
+      )!;
+      expect(errorCall).toBeDefined();
+      expect(errorCall[0].error).toBe('test exception');
+
+      expect(process.exit).toHaveBeenCalledTimes(1);
+      expect(process.exit).toHaveBeenCalledWith(1);
+
+      expect(worker.isShuttingDown()).toBe(true);
+    });
+
+    it('V.4 repeated process errors do not create duplicate shutdown flows', async () => {
+      vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+
+      const worker = await loadWorkerWithMockLogger({
+        processDueIntegrationEvents: vi.fn().mockResolvedValue(mockBatchResult),
+        closePool: vi.fn().mockResolvedValue(undefined),
+      });
+
+      await worker.startWorker({ intervalMs: 10000 });
+      await new Promise((r) => setTimeout(r, 20));
+
+      worker.registerProcessHandlers();
+      mockLogger.error.mockClear();
+
+      (process as NodeJS.Process).emit('unhandledRejection', new Error('first error'), undefined as unknown as Promise<unknown>);
+      (process as NodeJS.Process).emit('unhandledRejection', new Error('second error'), undefined as unknown as Promise<unknown>);
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      const rejectionCalls = mockLogger.error.mock.calls.filter(
+        (c) => c[0]?.event === 'integration_worker_unhandled_rejection'
+      );
+      expect(rejectionCalls).toHaveLength(2);
+
+      expect(worker.isShuttingDown()).toBe(true);
+    });
+
+    it('V.5 process error handler logs do not leak secret values from error objects', async () => {
+      vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+
+      const worker = await loadWorkerWithMockLogger({
+        processDueIntegrationEvents: vi.fn().mockResolvedValue(mockBatchResult),
+        closePool: vi.fn().mockResolvedValue(undefined),
+      });
+
+      await worker.startWorker({ intervalMs: 10000 });
+      await new Promise((r) => setTimeout(r, 20));
+
+      worker.registerProcessHandlers();
+      mockLogger.error.mockClear();
+
+      const secretError = new Error('provider connection failed');
+      (secretError as unknown as Record<string, unknown>).apiKey = 'SG.test.key.123';
+      (secretError as unknown as Record<string, unknown>).password = 'secret-password-123';
+
+      process.emit('unhandledRejection', secretError, undefined as unknown as Promise<unknown>);
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      const errorCall = mockLogger.error.mock.calls.find(
+        (c) => c[0]?.event === 'integration_worker_unhandled_rejection'
+      );
+      expect(errorCall).toBeDefined();
+      expect(errorCall![0].error).toBe('provider connection failed');
+
+      for (const call of mockLogger.error.mock.calls) {
+        const serialized = JSON.stringify(call[0]);
+        expect(serialized).not.toContain('SG.test.key');
+        expect(serialized).not.toContain('secret-password-123');
+      }
+    });
+
+    it('V.6 backend package.json includes start:worker and dev:worker scripts', () => {
+      const pkg = JSON.parse(
+        readFileSync(join(__dirname, '..', 'package.json'), 'utf-8')
+      );
+
+      expect(pkg.scripts['start:worker']).toBe(
+        'node dist/src/workers/integrationWorker.js'
+      );
+      expect(pkg.scripts['dev:worker']).toBe(
+        'tsx watch src/workers/integrationWorker.ts'
+      );
     });
   });
 });
