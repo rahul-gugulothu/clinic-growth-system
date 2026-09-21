@@ -181,6 +181,14 @@ export default function FounderAIPage() {
           <Badge tone="muted" className="text-xs">
             Prototype
           </Badge>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => navigate('/internal/ai/executions')}
+            className="gap-1.5 text-xs"
+          >
+            Execution History
+          </Button>
           {returnLabel && returnTo && (
             <Button
               variant="ghost"

@@ -9,7 +9,10 @@
     "preview": "vite preview",
     "typecheck": "tsc -b --noEmit",
     "lint": "eslint .",
-    "format": "prettier --write \"src/**/*.{ts,tsx,css}\""
+    "format": "prettier --write \"src/**/*.{ts,tsx,css}\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:ci": "vitest run --coverage"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.1",
@@ -33,6 +36,9 @@
     "zustand": "^4.5.5"
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
     "@types/node": "^20.16.13",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
@@ -43,12 +49,14 @@
     "eslint": "^8.57.1",
     "eslint-plugin-react-hooks": "^5.0.0",
     "eslint-plugin-react-refresh": "^0.4.14",
+    "happy-dom": "^20.14.5",
     "postcss": "^8.4.49",
     "prettier": "^3.3.3",
     "prettier-plugin-tailwindcss": "^0.6.8",
     "tailwindcss": "^3.4.14",
     "typescript": "^5.6.3",
     "vite": "^5.4.10",
-    "vite-tsconfig-paths": "^5.1.0"
+    "vite-tsconfig-paths": "^5.1.0",
+    "vitest": "^2.1.9"
   }
 }

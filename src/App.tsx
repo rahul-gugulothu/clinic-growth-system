@@ -1,5 +1,7 @@
-import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { useEffect } from 'react';
 import { useStore } from '@/store';
+import { UNAUTH_EVENT, clearAuth } from '@/api/client';
 import LoginPage from '@/pages/LoginPage';
 import WorkspaceSelectionPage from '@/pages/WorkspaceSelectionPage';
 import NotFoundPage from '@/pages/NotFoundPage';
@@ -13,6 +15,7 @@ import OutreachBoardPage from '@/features/internal/outreach/OutreachBoardPage';
 import SalesProposalsPage from '@/features/internal/sales/SalesProposalsPage';
 import ReportsPage from '@/features/internal/reports/ReportsPage';
 import FounderAIPage from '@/features/internal/ai/FounderAIPage';
+import AIExecutionsPage from '@/features/internal/ai/AIExecutionsPage';
 import InternalSettingsPage from '@/features/internal/settings/InternalSettingsPage';
 import ClinicOnboardingPage from '@/features/onboarding/ClinicOnboardingPage';
 import ClinicLayout from '@/layouts/ClinicLayout';
@@ -52,58 +55,82 @@ function RequireClinicWorkspace({ children }: { children: JSX.Element }) {
   return children;
 }
 
+function AuthInitializer({ children }: { children: JSX.Element }) {
+  const navigate = useNavigate();
+  const restoreSession = useStore((s) => s.restoreSession);
+  const logout = useStore((s) => s.logout);
+
+  useEffect(() => {
+    restoreSession();
+  }, [restoreSession]);
+
+  useEffect(() => {
+    const handler = () => {
+      logout();
+      clearAuth();
+      navigate('/login', { replace: true });
+    };
+    window.addEventListener(UNAUTH_EVENT, handler);
+    return () => window.removeEventListener(UNAUTH_EVENT, handler);
+  }, [navigate, logout]);
+
+  return <>{children}</>;
+}
+
 export default function App() {
   return (
-    <Routes>
-      <Route path="/login" element={<LoginPage />} />
-      <Route
-        path="/select-workspace"
-        element={
-          <RequireAuth>
-            <WorkspaceSelectionPage />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/internal/*"
-        element={
-          <RequireAuth>
-            <InternalLayout />
-          </RequireAuth>
-        }
-      >
-        <Route index element={<InternalDashboardPage />} />
-        <Route path="prospects" element={<ProspectsListPage />} />
-        <Route path="prospects/:prospectId" element={<ProspectProfilePage />} />
-        <Route path="audits" element={<AuditsListPage />} />
-        <Route path="audits/:auditId" element={<AuditDetailPage />} />
-        <Route path="outreach" element={<OutreachBoardPage />} />
-        <Route path="sales" element={<SalesProposalsPage />} />
-        <Route path="reports" element={<ReportsPage />} />
-        <Route path="ai" element={<FounderAIPage />} />
-        <Route path="settings" element={<InternalSettingsPage />} />
-      </Route>
-      <Route
-        path="/clinic/*"
-        element={
-          <RequireAuth>
-            <RequireClinicWorkspace>
-              <ClinicLayout />
-            </RequireClinicWorkspace>
-          </RequireAuth>
-        }
-      >
-        <Route index element={<ClinicDashboardPage />} />
-        <Route path="leads" element={<LeadsListPage />} />
-        <Route path="leads/:leadId" element={<LeadDetailPage />} />
-        <Route path="conversations" element={<ConversationsPage />} />
-        <Route path="appointments" element={<AppointmentsPage />} />
-        <Route path="follow-ups" element={<FollowupsPage />} />
-        <Route path="reviews" element={<ReviewsPage />} />
-        <Route path="referrals" element={<ReferralsPage />} />
-        <Route path="analytics" element={<AnalyticsPage />} />
-        <Route path="settings" element={<ClinicSettingsPage />} />
-      </Route>
+    <AuthInitializer>
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route
+          path="/select-workspace"
+          element={
+            <RequireAuth>
+              <WorkspaceSelectionPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/internal/*"
+          element={
+            <RequireAuth>
+              <InternalLayout />
+            </RequireAuth>
+          }
+        >
+          <Route index element={<InternalDashboardPage />} />
+          <Route path="prospects" element={<ProspectsListPage />} />
+          <Route path="prospects/:prospectId" element={<ProspectProfilePage />} />
+          <Route path="audits" element={<AuditsListPage />} />
+          <Route path="audits/:auditId" element={<AuditDetailPage />} />
+          <Route path="outreach" element={<OutreachBoardPage />} />
+          <Route path="sales" element={<SalesProposalsPage />} />
+          <Route path="reports" element={<ReportsPage />} />
+          <Route path="ai" element={<FounderAIPage />} />
+          <Route path="ai/executions" element={<AIExecutionsPage />} />
+          <Route path="settings" element={<InternalSettingsPage />} />
+        </Route>
+        <Route
+          path="/clinic/*"
+          element={
+            <RequireAuth>
+              <RequireClinicWorkspace>
+                <ClinicLayout />
+              </RequireClinicWorkspace>
+            </RequireAuth>
+          }
+        >
+          <Route index element={<ClinicDashboardPage />} />
+          <Route path="leads" element={<LeadsListPage />} />
+          <Route path="leads/:leadId" element={<LeadDetailPage />} />
+          <Route path="conversations" element={<ConversationsPage />} />
+          <Route path="appointments" element={<AppointmentsPage />} />
+          <Route path="follow-ups" element={<FollowupsPage />} />
+          <Route path="reviews" element={<ReviewsPage />} />
+          <Route path="referrals" element={<ReferralsPage />} />
+          <Route path="analytics" element={<AnalyticsPage />} />
+          <Route path="settings" element={<ClinicSettingsPage />} />
+        </Route>
       <Route
         path="/onboarding/:prospectId"
         element={
@@ -114,6 +141,7 @@ export default function App() {
       />
       <Route path="/" element={<Navigate to="/login" replace />} />
       <Route path="*" element={<NotFoundPage />} />
-    </Routes>
+      </Routes>
+    </AuthInitializer>
   );
 }

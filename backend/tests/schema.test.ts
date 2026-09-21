@@ -171,13 +171,20 @@ describe('Schema Validation', () => {
       { table: 'appointments', name: 'idx_appointments_status' },
       { table: 'reviews', name: 'idx_reviews_rating' },
       { table: 'business_outcomes', name: 'idx_business_outcomes_recorded_at' },
-    ];
+     ];
 
-    for (const { table, name } of expectedIndices) {
-      const indices = listIndices(table);
-      expect(indices, `Index ${name} should exist on ${table}`).toContain(name);
-    }
-  });
+     for (const { table, name } of expectedIndices) {
+       const indices = listIndices(table);
+       expect(indices, `Index ${name} should exist on ${table}`).toContain(name);
+     }
+   });
+
+   it('V3.1.4-A: ai_execution delivery status index exists on integration_events', () => {
+     const indices = listIndices('integration_events');
+     expect(indices, 'idx_integration_events_ai_execution_org should exist').toContain(
+       'idx_integration_events_ai_execution_org'
+     );
+   });
 
   it('Q6: no drafts table exists (drafts are frontend-only)', () => {
     expect(hasTable('drafts')).toBe(false);

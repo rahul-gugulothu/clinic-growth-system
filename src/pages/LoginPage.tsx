@@ -2,29 +2,48 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Stethoscope, ArrowRight } from 'lucide-react';
 import { useStore } from '@/store';
-import type { Role } from '@/types/entities';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/input';
-import { Select } from '@/components/ui/select';
+import { login as apiLogin } from '@/api/client';
+
+const BACKEND_ROLE_TO_FRONTEND: Record<string, 'founder' | 'intern' | 'clinicOwner' | 'clinicStaff'> = {
+  org_admin: 'founder',
+  founder: 'founder',
+  clinic_owner: 'clinicOwner',
+  clinic_doctor: 'clinicStaff',
+  clinic_reception: 'clinicStaff',
+  clinic_coordinator: 'clinicStaff',
+};
 
 export default function LoginPage() {
   const navigate = useNavigate();
-  const login = useStore((s) => s.login);
-  const [email, setEmail] = useState('demo@clinicgrowth.local');
-  const [password, setPassword] = useState('demo');
-  const [role, setRole] = useState<Role>('founder');
+  const storeLogin = useStore((s) => s.login);
+  const [email, setEmail] = useState('founder@cliniciogrowth.local');
   const [err, setErr] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
 
-  const onSubmit = (e: React.FormEvent) => {
+  const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email || !password) {
-      setErr('Email and password are required.');
+    if (!email) {
+      setErr('Email is required.');
       return;
     }
-    login(email, role);
-    navigate('/select-workspace', { replace: true });
+    setIsLoading(true);
+    setErr(null);
+
+    try {
+      const { user } = await apiLogin(email);
+      const role = (BACKEND_ROLE_TO_FRONTEND[user.role] ?? 'founder') as 'founder' | 'intern' | 'clinicOwner' | 'clinicStaff';
+      storeLogin(email, role);
+      navigate('/select-workspace', { replace: true });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Login failed. Please try again.';
+      setErr(message);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (
@@ -33,11 +52,12 @@ export default function LoginPage() {
         <CardHeader>
           <div className="mb-2 flex items-center gap-2">
             <Stethoscope className="h-5 w-5 text-primary" />
-            <span className="text-sm font-medium text-muted-foreground">V1 Prototype</span>
+            <span className="text-sm font-medium text-muted-foreground">Clinic Growth System</span>
           </div>
           <CardTitle>Sign in to Clinic Growth System</CardTitle>
           <CardDescription>
-            Demo authentication — any credentials are accepted. Pick a role to simulate.
+            Enter your email to authenticate against the backend. Use seeded dev accounts
+            (e.g. founder@cliniciogrowth.local).
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -53,29 +73,10 @@ export default function LoginPage() {
                 autoFocus
               />
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="password">Password</Label>
-              <Input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="role">Role</Label>
-              <Select id="role" value={role} onChange={(e) => setRole(e.target.value as Role)}>
-                <option value="founder">Founder</option>
-                <option value="intern">Intern</option>
-                <option value="clinicOwner">Clinic Owner</option>
-                <option value="clinicStaff">Clinic Staff</option>
-              </Select>
-            </div>
             {err && <p className="text-sm text-destructive">{err}</p>}
-            <Button type="submit" className="w-full">
-              Continue
-              <ArrowRight className="ml-2 h-4 w-4" />
+            <Button type="submit" className="w-full" disabled={isLoading}>
+              {isLoading ? 'Signing in...' : 'Continue'}
+              <ArrowRight className={`ml-2 h-4 w-4 ${isLoading ? 'hidden' : ''}`} />
             </Button>
           </form>
         </CardContent>

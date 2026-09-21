@@ -1,8 +1,23 @@
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-nocheck
+
+const BACKEND_ROLE_TO_FRONTEND: Record<string, Role> = {
+  org_admin: 'founder',
+  founder: 'founder',
+  clinic_owner: 'clinicOwner',
+  clinic_doctor: 'clinicStaff',
+  clinic_reception: 'clinicStaff',
+  clinic_coordinator: 'clinicStaff',
+};
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { newId } from '@/lib/ids';
+import {
+  getToken,
+  getStoredUser,
+  clearAuth,
+  decodeJwt,
+} from '@/api/client';
 import {
   type OutreachStage,
   type ProposalStatus,
@@ -164,6 +179,7 @@ interface Actions {
   // session
   login: (email: string, role: Role) => void;
   logout: () => void;
+  restoreSession: () => void;
   setWorkspace: (ws: Workspace) => void;
   setActiveClinic: (clinicId: ID | null) => void;
   resetDemo: () => void;
@@ -258,10 +274,30 @@ export const useStore = create<State & Actions>()(
       login: (email, role) =>
         set((s) => ({ session: { ...s.session, email, currentRole: role, activeClinicId: s.session.activeClinicId } })),
 
-      logout: () =>
+      logout: () => {
+        clearAuth();
         set(() => ({
           session: initialSession,
-        })),
+        }));
+      },
+
+      restoreSession: () => {
+        const token = getToken();
+        const user = getStoredUser();
+        if (token && user) {
+          const decoded = decodeJwt(token);
+          if (decoded) {
+            const mappedRole = BACKEND_ROLE_TO_FRONTEND[decoded.role] ?? 'founder' as Role;
+            set((s) => ({
+              session: {
+                ...s.session,
+                email: user.email,
+                currentRole: mappedRole,
+              },
+            }));
+          }
+        }
+      },
 
       setWorkspace: (ws) =>
         set((s) => ({ session: { ...s.session, currentWorkspace: ws } })),

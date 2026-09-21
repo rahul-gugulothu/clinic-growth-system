@@ -11,6 +11,7 @@ import {
   LogOut,
   Stethoscope,
   Sparkles,
+  Activity,
   Search,
   Menu,
 } from 'lucide-react';
@@ -28,6 +29,7 @@ const NAV = [
   { to: '/internal/sales', label: 'Sales / Proposals', icon: FileText },
   { to: '/internal/reports', label: 'Reports', icon: BarChart3 },
   { to: '/internal/ai', label: 'Founder AI', icon: Sparkles },
+  { to: '/internal/ai/executions', label: 'AI Executions', icon: Activity },
   { to: '/internal/settings', label: 'Settings', icon: Settings },
 ];
 
