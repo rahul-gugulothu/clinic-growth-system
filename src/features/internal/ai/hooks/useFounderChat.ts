@@ -1,7 +1,9 @@
 import { useState, useCallback } from 'react';
 import type { ChatMessage, ConversationContext, ActivityItem, AIToolResult } from '../types';
+import type { AiToolExecutionResult, AiExecutionStatus } from '../types/api';
 import { WELCOME_MESSAGE } from '../utils/promptTemplates';
-import { executeTool, getToolForPrompt, resolveProspectFromMessage } from '../tools/toolRegistry';
+import { getToolForPrompt, resolveProspectFromMessage, getToolResultType, TOOL_BY_ID } from '../tools/toolRegistry';
+import { executeAITool, approveAIExecution, rejectAIExecution, ApiError } from '@/api/client';
 
 const generateId = () => `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
@@ -38,118 +40,75 @@ export function useFounderChat(storeData: {
     setActivities((prev) => [newActivity, ...prev].slice(0, 10));
   }, []);
 
-  const runTool = useCallback((toolId: string, prospectId?: string, prospectName?: string, auditId?: string) => {
-    setContext((prev) => {
-      if (prospectId || prospectName) {
-        return {
-          ...prev,
-          lastProspectId: prospectId || prev.lastProspectId,
-          lastProspectName: prospectName || prev.lastProspectName,
-          lastAuditId: undefined,
-        };
-      }
-
-      if (auditId) {
-        return {
-          ...prev,
-          lastAuditId: auditId,
-          lastProspectId: undefined,
-          lastProspectName: undefined,
-        };
-      }
-
-      return prev;
-    });
-
-    const loadingMessage: ChatMessage = {
-      id: generateId(),
-      role: 'assistant',
-      content: 'Running tool...',
-      timestamp: new Date(),
-      isLoading: true,
+  const mapBackendResult = useCallback((execution: AiToolExecutionResult): AIToolResult => {
+    const resultType = getToolResultType(execution.tool_id);
+    const toolDef = TOOL_BY_ID[execution.tool_id];
+    return {
+      toolId: execution.tool_id,
+      toolName: toolDef?.name ?? execution.tool_id,
+      resultType,
+      data: execution.data as AIToolResult['data'],
+      requiresHumanReview: execution.requires_human_review,
+      executionId: execution.id,
+      executionStatus: execution.status,
     };
-    setMessages((prev) => [...prev, loadingMessage]);
-    setIsLoading(true);
+  }, []);
 
-    setTimeout(() => {
-      const toolContext = {
-        prospectId: prospectId || context.lastProspectId,
-        prospectName: prospectName || context.lastProspectName,
-        auditId: auditId || context.lastAuditId,
-        store: storeData,
-      };
-
-      const result = executeTool(toolId, toolContext);
-
-      const responseMessage: ChatMessage = {
-        id: generateId(),
-        role: 'assistant',
-        content: formatToolResult(result),
-        timestamp: new Date(),
-        toolResult: result,
-      };
-
+  const updateMessageExecutionStatus = useCallback(
+    (executionId: string, status: AiExecutionStatus) => {
       setMessages((prev) =>
-        prev.map((msg) => (msg.isLoading ? responseMessage : msg)),
+        prev.map((msg) =>
+          msg.toolResult?.executionId === executionId
+            ? { ...msg, toolResult: { ...msg.toolResult!, executionStatus: status } }
+            : msg
+        )
       );
+    },
+    []
+  );
 
-      if (result.resultType !== 'error') {
-        addActivity(`Ran ${result.toolName}`, result.toolName, result.requiresHumanReview ? 'draft' : 'summary');
-      }
+  const runTool = useCallback(
+    async (toolId: string, prospectId?: string, prospectName?: string, auditId?: string) => {
+      setContext((prev) => {
+        if (prospectId || prospectName) {
+          return {
+            ...prev,
+            lastProspectId: prospectId || prev.lastProspectId,
+            lastProspectName: prospectName || prev.lastProspectName,
+            lastAuditId: undefined,
+          };
+        }
 
-      setIsLoading(false);
-    }, 300);
-  }, [context, storeData, addActivity]);
+        if (auditId) {
+          return {
+            ...prev,
+            lastAuditId: auditId,
+            lastProspectId: undefined,
+            lastProspectName: undefined,
+          };
+        }
 
-  const sendMessage = useCallback((content: string) => {
-    if (!content.trim()) return;
+        return prev;
+      });
 
-    const prospectMatch = resolveProspectFromMessage(content, storeData.prospects as Record<string, { clinic_name: string; doctor_name: string; prospect_id: string }>);
-
-    if (prospectMatch) {
-      setContext((prev) => ({
-        ...prev,
-        lastProspectId: prospectMatch.prospectId,
-        lastProspectName: prospectMatch.prospectName,
-        lastAuditId: undefined,
-      }));
-    }
-
-    const userMessage: ChatMessage = {
-      id: generateId(),
-      role: 'user',
-      content: content.trim(),
-      timestamp: new Date(),
-    };
-
-    setMessages((prev) => [...prev, userMessage]);
-    setInputValue('');
-
-    const toolId = getToolForPrompt(content, {
-      prospectId: prospectMatch?.prospectId || context.lastProspectId,
-      prospectName: prospectMatch?.prospectName || context.lastProspectName,
-    });
-
-    if (toolId) {
       const loadingMessage: ChatMessage = {
         id: generateId(),
         role: 'assistant',
-        content: 'Thinking...',
+        content: 'Running tool...',
         timestamp: new Date(),
         isLoading: true,
       };
       setMessages((prev) => [...prev, loadingMessage]);
       setIsLoading(true);
 
-      setTimeout(() => {
-        const toolContext = {
-          prospectId: prospectMatch?.prospectId || context.lastProspectId,
-          prospectName: prospectMatch?.prospectName || context.lastProspectName,
-          auditId: context.lastAuditId,
-          store: storeData,
-        };
+      const toolContext = {
+        prospectId: prospectId || context.lastProspectId,
+        auditId: auditId || context.lastAuditId,
+      };
 
-        const result = executeTool(toolId, toolContext);
+      try {
+        const execution = await executeAITool(toolId, toolContext);
+        const result = mapBackendResult(execution);
 
         const responseMessage: ChatMessage = {
           id: generateId(),
@@ -163,30 +122,186 @@ export function useFounderChat(storeData: {
           prev.map((msg) => (msg.isLoading ? responseMessage : msg)),
         );
 
-        if (result.resultType !== 'error' && prospectMatch) {
-          setContext((prev) => ({
-            ...prev,
-            lastProspectId: prospectMatch.prospectId,
-            lastProspectName: prospectMatch.prospectName,
-          }));
-        }
-
         if (result.resultType !== 'error') {
           addActivity(`Ran ${result.toolName}`, result.toolName, result.requiresHumanReview ? 'draft' : 'summary');
         }
-
+      } catch (err) {
+        const errorMsg =
+          err instanceof ApiError ? err.message :
+          err instanceof Error ? err.message : String(err);
+        const errorResult: AIToolResult = {
+          toolId: toolId,
+          toolName: TOOL_BY_ID[toolId]?.name ?? toolId,
+          resultType: 'error',
+          data: { message: errorMsg },
+        };
+        const errorResponse: ChatMessage = {
+          id: generateId(),
+          role: 'assistant',
+          content: `Error: ${errorMsg}`,
+          timestamp: new Date(),
+          toolResult: errorResult,
+        };
+        setMessages((prev) =>
+          prev.map((msg) => (msg.isLoading ? errorResponse : msg)),
+        );
+      } finally {
         setIsLoading(false);
-      }, 500);
-    } else {
-      const fallbackMessage: ChatMessage = {
+      }
+    },
+    [context, addActivity, mapBackendResult],
+  );
+
+  const sendMessage = useCallback(
+    async (content: string) => {
+      if (!content.trim()) return;
+
+      const prospectMatch = resolveProspectFromMessage(
+        content,
+        storeData.prospects as Record<string, { clinic_name: string; doctor_name: string; prospect_id: string }>,
+      );
+
+      if (prospectMatch) {
+        setContext((prev) => ({
+          ...prev,
+          lastProspectId: prospectMatch.prospectId,
+          lastProspectName: prospectMatch.prospectName,
+          lastAuditId: undefined,
+        }));
+      }
+
+      const userMessage: ChatMessage = {
         id: generateId(),
-        role: 'assistant',
-        content: "I don't have a tool for that yet. Try asking about your pipeline, prospects, outreach, proposals, or today's priorities.",
+        role: 'user',
+        content: content.trim(),
         timestamp: new Date(),
       };
-      setMessages((prev) => [...prev, fallbackMessage]);
-    }
-  }, [storeData, context, addActivity]);
+
+      setMessages((prev) => [...prev, userMessage]);
+      setInputValue('');
+
+      const toolId = getToolForPrompt(content, {
+        prospectId: prospectMatch?.prospectId || context.lastProspectId,
+        prospectName: prospectMatch?.prospectName || context.lastProspectName,
+      });
+
+      if (toolId) {
+        const loadingMessage: ChatMessage = {
+          id: generateId(),
+          role: 'assistant',
+          content: 'Thinking...',
+          timestamp: new Date(),
+          isLoading: true,
+        };
+        setMessages((prev) => [...prev, loadingMessage]);
+        setIsLoading(true);
+
+        const toolContext = {
+          prospectId: prospectMatch?.prospectId || context.lastProspectId,
+          auditId: context.lastAuditId,
+        };
+
+        try {
+          const execution = await executeAITool(toolId, toolContext);
+          const result = mapBackendResult(execution);
+
+          const responseMessage: ChatMessage = {
+            id: generateId(),
+            role: 'assistant',
+            content: formatToolResult(result),
+            timestamp: new Date(),
+            toolResult: result,
+          };
+
+          setMessages((prev) =>
+            prev.map((msg) => (msg.isLoading ? responseMessage : msg)),
+          );
+
+          if (result.resultType !== 'error' && prospectMatch) {
+            setContext((prev) => ({
+              ...prev,
+              lastProspectId: prospectMatch.prospectId,
+              lastProspectName: prospectMatch.prospectName,
+            }));
+          }
+
+          if (result.resultType !== 'error') {
+            addActivity(`Ran ${result.toolName}`, result.toolName, result.requiresHumanReview ? 'draft' : 'summary');
+          }
+        } catch (err) {
+          const errorMsg =
+            err instanceof ApiError ? err.message :
+            err instanceof Error ? err.message : String(err);
+          const errorResult: AIToolResult = {
+            toolId: toolId,
+            toolName: TOOL_BY_ID[toolId]?.name ?? toolId,
+            resultType: 'error',
+            data: { message: errorMsg },
+          };
+          const errorResponse: ChatMessage = {
+            id: generateId(),
+            role: 'assistant',
+            content: `Error: ${errorMsg}`,
+            timestamp: new Date(),
+            toolResult: errorResult,
+          };
+          setMessages((prev) =>
+            prev.map((msg) => (msg.isLoading ? errorResponse : msg)),
+          );
+          addActivity(
+            `Error running ${TOOL_BY_ID[toolId]?.name ?? toolId}`,
+            errorMsg,
+            'summary',
+          );
+        } finally {
+          setIsLoading(false);
+        }
+      } else {
+        const fallbackMessage: ChatMessage = {
+          id: generateId(),
+          role: 'assistant',
+          content: "I don't have a tool for that yet. Try asking about your pipeline, prospects, outreach, proposals, or today's priorities.",
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, fallbackMessage]);
+      }
+    },
+    [storeData, context, addActivity, mapBackendResult],
+  );
+
+  const approveToolExecution = useCallback(
+    async (executionId: string) => {
+      try {
+        await approveAIExecution(executionId);
+        updateMessageExecutionStatus(executionId, 'approved');
+        addActivity('Approved execution', `Execution ${executionId} approved`, 'summary');
+      } catch (err) {
+        const errorMsg =
+          err instanceof ApiError ? err.message :
+          err instanceof Error ? err.message : String(err);
+        addActivity('Approval failed', errorMsg, 'summary');
+        throw err;
+      }
+    },
+    [updateMessageExecutionStatus, addActivity],
+  );
+
+  const rejectToolExecution = useCallback(
+    async (executionId: string, reason: string) => {
+      try {
+        await rejectAIExecution(executionId, reason);
+        updateMessageExecutionStatus(executionId, 'rejected');
+        addActivity('Rejected execution', `Execution ${executionId} rejected: ${reason}`, 'summary');
+      } catch (err) {
+        const errorMsg =
+          err instanceof ApiError ? err.message :
+          err instanceof Error ? err.message : String(err);
+        addActivity('Rejection failed', errorMsg, 'summary');
+        throw err;
+      }
+    },
+    [updateMessageExecutionStatus, addActivity],
+  );
 
   const clearChat = useCallback(() => {
     setMessages(initialMessages);
@@ -205,6 +320,8 @@ export function useFounderChat(storeData: {
     runTool,
     setInputValue,
     clearChat,
+    approveToolExecution,
+    rejectToolExecution,
   };
 }
 
@@ -236,12 +353,18 @@ function formatToolResult(result: AIToolResult): string {
     case 'draft_whatsapp':
     case 'draft_email': {
       const data = result.data as { channel: string; recipient: string; draftText: string; reasoning: string };
+      const statusNote =
+        result.executionStatus === 'approved' ? '✅ Approved — integration event created' :
+        result.executionStatus === 'rejected' ? '❌ Rejected' :
+        result.executionStatus === 'requires_approval' ? '⏳ Awaiting your approval' :
+        '';
       return [
         `**Draft ${data.channel} for ${data.recipient}**`,
         '',
         data.draftText,
         '',
         result.requiresHumanReview ? '⚠️ Human review required before sending' : '',
+        statusNote,
       ].filter(Boolean).join('\n');
     }
     case 'call_preparation': {
@@ -265,6 +388,11 @@ function formatToolResult(result: AIToolResult): string {
     }
     case 'proposal_draft': {
       const data = result.data as { clinic: string; scope: string; expectedOutcomes: string; timeline: string; price?: number; assumptions: string[]; nextStep: string };
+      const statusNote =
+        result.executionStatus === 'approved' ? '✅ Approved' :
+        result.executionStatus === 'rejected' ? '❌ Rejected' :
+        result.executionStatus === 'requires_approval' ? '⏳ Awaiting your approval' :
+        '';
       return [
         `**Proposal Draft for ${data.clinic}**`,
         '',
@@ -282,6 +410,7 @@ function formatToolResult(result: AIToolResult): string {
         `**Next Step:** ${data.nextStep}`,
         '',
         result.requiresHumanReview ? '⚠️ Human review required before sending' : '',
+        statusNote,
       ].flat().filter(Boolean).join('\n');
     }
     case 'pipeline_diagnosis': {

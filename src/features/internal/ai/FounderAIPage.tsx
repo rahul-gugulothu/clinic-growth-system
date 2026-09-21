@@ -40,6 +40,8 @@ export default function FounderAIPage() {
     setInputValue,
     clearChat,
     activities,
+    approveToolExecution,
+    rejectToolExecution,
   } = useFounderChat(store);
 
   const location = useLocation();
@@ -253,7 +255,11 @@ export default function FounderAIPage() {
                 <SuggestionChips onSelect={handleSuggestionSelect} />
               </div>
             ) : (
-              <ChatWindow messages={messages} />
+                <ChatWindow
+                messages={messages}
+                onApproveExecution={approveToolExecution}
+                onRejectExecution={rejectToolExecution}
+              />
             )}
 
             <ChatComposer

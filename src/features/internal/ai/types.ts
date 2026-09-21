@@ -49,6 +49,8 @@ export interface AIToolResult {
   resultType: ToolResultType;
   data: PriorityClinicsResult | ProspectSummaryResult | DraftMessageResult | CallPrepResult | ProposalDraftResult | PipelineDiagnosisResult | WorkPlannerResult | WeeklyReportResult | GrowthOpportunitiesResult | AuditSummaryResult | ErrorResult | TextResult;
   requiresHumanReview?: boolean;
+  executionId?: string;
+  executionStatus?: import('./types/api').AiExecutionStatus;
 }
 
 export interface PriorityClinicsResult {

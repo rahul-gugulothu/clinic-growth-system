@@ -1,4 +1,4 @@
-import type { ToolDefinition, ToolContext, AIToolResult } from '../types';
+import type { ToolDefinition, ToolContext, AIToolResult, ToolResultType } from '../types';
 import { priorityClinicsTool } from './priorityClinics';
 import { prospectSummaryTool } from './prospectSummary';
 import { draftWhatsAppTool } from './draftWhatsApp';
@@ -204,3 +204,21 @@ export function resolveProspectFromMessage(
 }
 
 export { priorityClinicsTool, prospectSummaryTool, draftWhatsAppTool, draftEmailTool, callPreparationTool, generateProposalTool, pipelineDiagnosisTool, workPlannerTool, weeklyReportTool, growthOpportunitiesTool, auditSummaryTool };
+
+export const TOOL_RESULT_TYPE_MAP: Record<string, ToolResultType> = {
+  'priority-clinics': 'priority_clinics',
+  'prospect-summary': 'prospect_summary',
+  'draft-whatsapp': 'draft_whatsapp',
+  'draft-email': 'draft_email',
+  'call-preparation': 'call_preparation',
+  'generate-proposal': 'proposal_draft',
+  'pipeline-diagnosis': 'pipeline_diagnosis',
+  'work-planner': 'work_planner',
+  'weekly-report': 'weekly_report',
+  'growth-opportunities': 'growth_opportunities',
+  'audit-summary': 'audit_summary',
+};
+
+export function getToolResultType(toolId: string): ToolResultType {
+  return TOOL_RESULT_TYPE_MAP[toolId] ?? 'text';
+}

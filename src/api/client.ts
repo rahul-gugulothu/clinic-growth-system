@@ -7,6 +7,8 @@ import type {
   AiExecution,
   AiExecutionWithDeliveryStatus,
   AiExecutionWithIntegration,
+  AiToolDefinition,
+  AiToolExecutionResult,
   Pagination,
 } from '../features/internal/ai/types/api';
 
@@ -220,6 +222,25 @@ export async function rejectAIExecution(id: string, reason: string): Promise<AiE
     body: JSON.stringify({ reason }),
   });
   return data.execution;
+}
+
+export async function executeAITool(
+  toolId: string,
+  context: Record<string, unknown> = {}
+): Promise<AiToolExecutionResult> {
+  const data = await request<{ execution: AiToolExecutionResult }>(
+    `ai/tools/${toolId}`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ context }),
+    }
+  );
+  return data.execution;
+}
+
+export async function listAITools(): Promise<AiToolDefinition[]> {
+  const data = await request<{ tools: AiToolDefinition[] }>('ai/tools');
+  return data.tools;
 }
 
 export { UNAUTH_EVENT };

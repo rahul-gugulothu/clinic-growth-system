@@ -158,4 +158,106 @@ describe('API Client', () => {
       expect(decoded).toBeNull();
     });
   });
+
+  describe('executeAITool', () => {
+    const mockExecution = {
+      id: 'exec-1',
+      organization_id: 'org-1',
+      tool_id: 'priority-clinics',
+      status: 'completed' as const,
+      data: { clinics: [] },
+      requires_human_review: false,
+      duration_ms: 100,
+      created_at: '2024-01-01T10:00:00Z',
+      completed_at: '2024-01-01T10:00:01Z',
+      approved_by: null,
+      approved_at: null,
+    };
+
+    it('sends POST with context body', async () => {
+      localStorage.setItem('cgs_access_token', mockToken);
+      mockFetch.mockResolvedValue(mockResponse({ execution: mockExecution }));
+
+      const result = await client.executeAITool('priority-clinics', { prospectId: 'abc-123' });
+
+      expect(result).toEqual(mockExecution);
+      const call = mockFetch.mock.calls[0];
+      expect(call[0]).toContain('ai/tools/priority-clinics');
+      expect(call[1].method).toBe('POST');
+      const body = JSON.parse(call[1].body as string);
+      expect(body.context).toEqual({ prospectId: 'abc-123' });
+    });
+
+    it('defaults context to empty object', async () => {
+      localStorage.setItem('cgs_access_token', mockToken);
+      mockFetch.mockResolvedValue(mockResponse({ execution: mockExecution }));
+
+      await client.executeAITool('priority-clinics');
+
+      const call = mockFetch.mock.calls[0];
+      const body = JSON.parse(call[1].body as string);
+      expect(body.context).toEqual({});
+    });
+
+    it('includes Bearer token', async () => {
+      localStorage.setItem('cgs_access_token', mockToken);
+      mockFetch.mockResolvedValue(mockResponse({ execution: mockExecution }));
+
+      await client.executeAITool('priority-clinics');
+
+      const call = mockFetch.mock.calls[0];
+      const headers = call[1].headers as Record<string, string>;
+      expect(headers['Authorization']).toBe(`Bearer ${mockToken}`);
+    });
+
+    it('throws ApiError on 400', async () => {
+      localStorage.setItem('cgs_access_token', mockToken);
+      mockFetch.mockResolvedValue(
+        mockResponse({ error: { message: 'Invalid context' } }, 400),
+      );
+
+      await expect(client.executeAITool('prospect-summary', {})).rejects.toThrow('Invalid context');
+    });
+
+    it('returns execution for requires_approval tools', async () => {
+      const approvalExec = { ...mockExecution, tool_id: 'draft-email', status: 'requires_approval' as const, requires_human_review: true };
+      localStorage.setItem('cgs_access_token', mockToken);
+      mockFetch.mockResolvedValue(mockResponse({ execution: approvalExec }));
+
+      const result = await client.executeAITool('draft-email', { prospectId: 'abc-123' });
+
+      expect(result.status).toBe('requires_approval');
+      expect(result.requires_human_review).toBe(true);
+    });
+  });
+
+  describe('listAITools', () => {
+    const mockTools = [
+      { id: 'priority-clinics', name: 'Priority Clinics', description: 'Get top prospects', tenant_scope: 'org' as const, required_context: [], human_review_required: false },
+      { id: 'draft-email', name: 'Draft Email', description: 'Generate email', tenant_scope: 'org' as const, required_context: ['prospectId'], human_review_required: true },
+    ];
+
+    it('returns tools array', async () => {
+      localStorage.setItem('cgs_access_token', mockToken);
+      mockFetch.mockResolvedValue(mockResponse({ tools: mockTools }));
+
+      const result = await client.listAITools();
+
+      expect(result).toEqual(mockTools);
+      expect(result).toHaveLength(2);
+      const call = mockFetch.mock.calls[0];
+      expect(call[0]).toContain('ai/tools');
+    });
+
+    it('includes Bearer token', async () => {
+      localStorage.setItem('cgs_access_token', mockToken);
+      mockFetch.mockResolvedValue(mockResponse({ tools: mockTools }));
+
+      await client.listAITools();
+
+      const call = mockFetch.mock.calls[0];
+      const headers = call[1].headers as Record<string, string>;
+      expect(headers['Authorization']).toBe(`Bearer ${mockToken}`);
+    });
+  });
 });

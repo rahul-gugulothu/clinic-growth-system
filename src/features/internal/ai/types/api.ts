@@ -87,6 +87,29 @@ export interface LoginResponse {
   expires_in: number;
 }
 
+export interface AiToolDefinition {
+  id: string;
+  name: string;
+  description: string;
+  tenant_scope: 'org' | 'clinic' | 'mixed';
+  required_context: string[];
+  human_review_required: boolean;
+}
+
+export interface AiToolExecutionResult {
+  id: string;
+  organization_id: string;
+  tool_id: string;
+  status: AiExecutionStatus;
+  data: unknown;
+  requires_human_review: boolean;
+  duration_ms: number | null;
+  created_at: string;
+  completed_at: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+}
+
 export interface JwtPayload {
   sub: string;
   org_id: string;
