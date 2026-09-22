@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { RefreshCw, CheckCircle, XCircle, AlertCircle, Settings } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import { Badge } from '@/components/ui/badge';
@@ -48,6 +49,7 @@ export default function IntegrationHealthPage() {
   const [health, setHealth] = useState<IntegrationHealthResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const navigate = useNavigate();
 
   const loadHealth = useCallback(async () => {
     setIsLoading(true);
@@ -88,6 +90,9 @@ export default function IntegrationHealthPage() {
           <Button variant="outline" size="sm" onClick={loadHealth} disabled={isLoading}>
             <RefreshCw className={cn('h-4 w-4', isLoading && 'animate-spin')} />
             <span className="ml-1">Check health</span>
+          </Button>
+          <Button size="sm" onClick={() => navigate('/internal/integrations/config')}>
+            Configure
           </Button>
         </div>
       </div>
@@ -166,8 +171,17 @@ export default function IntegrationHealthPage() {
       )}
 
       {!health && !isLoading && !error && (
-        <div className="rounded-lg border p-4 text-sm text-muted-foreground">
-          No integration providers configured.
+        <div className="rounded-lg border p-4">
+          <div className="text-sm text-muted-foreground">
+            No integration providers configured.
+          </div>
+          <Button
+            size="sm"
+            className="mt-3"
+            onClick={() => navigate('/internal/integrations/config')}
+          >
+            Configure SendGrid
+          </Button>
         </div>
       )}
     </div>

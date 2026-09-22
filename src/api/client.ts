@@ -10,6 +10,9 @@ import type {
   AiToolDefinition,
    AiToolExecutionResult,
    IntegrationHealthResponse,
+  IntegrationConfigStatus,
+  IntegrationConfigSetResponse,
+  IntegrationConfigDeleteResponse,
    Pagination,
 } from '../features/internal/ai/types/api';
 
@@ -246,6 +249,59 @@ export async function listAITools(): Promise<AiToolDefinition[]> {
 
 export async function getIntegrationHealth(): Promise<IntegrationHealthResponse> {
   return request<IntegrationHealthResponse>('integrations/health');
+}
+
+// Integration Config API (V3.1.9)
+
+export interface SetIntegrationConfigParams {
+  provider: string;
+  configKey: string;
+  value: string;
+}
+
+export async function setIntegrationConfig(params: SetIntegrationConfigParams): Promise<IntegrationConfigSetResponse> {
+  const data = await request<IntegrationConfigSetResponse>('integrations/config', {
+    method: 'PUT',
+    body: JSON.stringify({
+      provider: params.provider,
+      config_key: params.configKey,
+      config_value: params.value,
+    }),
+  });
+  return data;
+}
+
+export interface GetIntegrationConfigStatusParams {
+  provider: string;
+  configKey?: string;
+}
+
+export async function getIntegrationConfigStatus(params: GetIntegrationConfigStatusParams): Promise<IntegrationConfigStatus> {
+  const search = new URLSearchParams();
+  search.set('provider', params.provider);
+  if (params.configKey) {
+    search.set('config_key', params.configKey);
+  }
+  const queryString = search.toString();
+  const requestPath = 'integrations/config/status?' + queryString;
+  const data = await request<IntegrationConfigStatus>(requestPath);
+  return data;
+}
+
+export interface DeleteIntegrationConfigParams {
+  provider: string;
+  configKey: string;
+}
+
+export async function deleteIntegrationConfig(params: DeleteIntegrationConfigParams): Promise<IntegrationConfigDeleteResponse> {
+  const data = await request<IntegrationConfigDeleteResponse>('integrations/config', {
+    method: 'DELETE',
+    body: JSON.stringify({
+      provider: params.provider,
+      config_key: params.configKey,
+    }),
+  });
+  return data;
 }
 
 export { UNAUTH_EVENT };

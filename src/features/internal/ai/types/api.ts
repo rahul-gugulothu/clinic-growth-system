@@ -132,3 +132,21 @@ export interface IntegrationHealthResponse {
   integrations: Record<string, IntegrationProviderHealth>;
   all_healthy: boolean;
 }
+
+export interface IntegrationConfigStatus {
+  provider: string;
+  config_key?: string;
+  configured: boolean;
+}
+
+export interface IntegrationConfigSetResponse {
+  provider: string;
+  config_key: string;
+  configured: boolean;
+}
+
+export interface IntegrationConfigDeleteResponse {
+  provider: string;
+  config_key: string;
+  deleted: boolean;
+}

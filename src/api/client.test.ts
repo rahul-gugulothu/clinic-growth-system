@@ -305,4 +305,128 @@ describe('API Client', () => {
       await expect(client.getIntegrationHealth()).rejects.toThrow('Unauthorized');
     });
   });
+
+  describe('setIntegrationConfig', () => {
+    it('sends PUT request with provider, config_key, config_value', async () => {
+      localStorage.setItem('cgs_access_token', mockToken);
+      mockFetch.mockResolvedValue(mockResponse({ provider: 'sendgrid', config_key: 'api_key', configured: true }));
+
+      await client.setIntegrationConfig({ provider: 'sendgrid', configKey: 'api_key', value: 'SG.test123' });
+
+      const call = mockFetch.mock.calls[0];
+      expect(call[0]).toContain('integrations/config');
+      expect(call[1].method).toBe('PUT');
+      const body = JSON.parse(call[1].body);
+      expect(body.provider).toBe('sendgrid');
+      expect(body.config_key).toBe('api_key');
+      expect(body.config_value).toBe('SG.test123');
+    });
+
+    it('includes Bearer token', async () => {
+      localStorage.setItem('cgs_access_token', mockToken);
+      mockFetch.mockResolvedValue(mockResponse({ provider: 'sendgrid', config_key: 'api_key', configured: true }));
+
+      await client.setIntegrationConfig({ provider: 'sendgrid', configKey: 'api_key', value: 'key' });
+
+      const headers = mockFetch.mock.calls[0][1].headers as Record<string, string>;
+      expect(headers['Authorization']).toBe(`Bearer ${mockToken}`);
+    });
+
+    it('throws ApiError on failure', async () => {
+      localStorage.setItem('cgs_access_token', mockToken);
+      mockFetch.mockResolvedValue(mockResponse({ error: { message: 'Unauthorized', status: 401 } }, 401));
+
+      await expect(client.setIntegrationConfig({ provider: 'sendgrid', configKey: 'api_key', value: 'key' }))
+        .rejects.toThrow('Unauthorized');
+    });
+
+    it('handles 403 Forbidden', async () => {
+      localStorage.setItem('cgs_access_token', mockToken);
+      mockFetch.mockResolvedValue(mockResponse({ error: { message: 'Forbidden', status: 403 } }, 403));
+
+      await expect(client.setIntegrationConfig({ provider: 'sendgrid', configKey: 'api_key', value: 'key' }))
+        .rejects.toThrow('Forbidden');
+    });
+  });
+
+  describe('getIntegrationConfigStatus', () => {
+    it('sends GET request with provider and config_key query params', async () => {
+      localStorage.setItem('cgs_access_token', mockToken);
+      mockFetch.mockResolvedValue(mockResponse({ provider: 'sendgrid', config_key: 'api_key', configured: true }));
+
+      const result = await client.getIntegrationConfigStatus({ provider: 'sendgrid', configKey: 'api_key' });
+
+      expect(result.configured).toBe(true);
+      const call = mockFetch.mock.calls[0];
+      expect(call[0]).toContain('integrations/config/status');
+      expect(call[0]).toContain('provider=sendgrid');
+      expect(call[0]).toContain('config_key=api_key');
+    });
+
+    it('works without config_key parameter', async () => {
+      localStorage.setItem('cgs_access_token', mockToken);
+      mockFetch.mockResolvedValue(mockResponse({ provider: 'sendgrid', configured: true }));
+
+      const result = await client.getIntegrationConfigStatus({ provider: 'sendgrid' });
+
+      expect(result.configured).toBe(true);
+      const call = mockFetch.mock.calls[0];
+      expect(call[0]).toContain('integrations/config/status');
+      expect(call[0]).toContain('provider=sendgrid');
+    });
+
+    it('includes Bearer token', async () => {
+      localStorage.setItem('cgs_access_token', mockToken);
+      mockFetch.mockResolvedValue(mockResponse({ provider: 'sendgrid', config_key: 'api_key', configured: false }));
+
+      await client.getIntegrationConfigStatus({ provider: 'sendgrid', configKey: 'api_key' });
+
+      const headers = mockFetch.mock.calls[0][1].headers as Record<string, string>;
+      expect(headers['Authorization']).toBe(`Bearer ${mockToken}`);
+    });
+
+    it('returns configured=false when no key exists', async () => {
+      localStorage.setItem('cgs_access_token', mockToken);
+      mockFetch.mockResolvedValue(mockResponse({ provider: 'sendgrid', config_key: 'api_key', configured: false }));
+
+      const result = await client.getIntegrationConfigStatus({ provider: 'sendgrid', configKey: 'api_key' });
+
+      expect(result.configured).toBe(false);
+    });
+  });
+
+  describe('deleteIntegrationConfig', () => {
+    it('sends DELETE request with provider and config_key', async () => {
+      localStorage.setItem('cgs_access_token', mockToken);
+      mockFetch.mockResolvedValue(mockResponse({ provider: 'sendgrid', config_key: 'api_key', deleted: true }));
+
+      await client.deleteIntegrationConfig({ provider: 'sendgrid', configKey: 'api_key' });
+
+      const call = mockFetch.mock.calls[0];
+      expect(call[0]).toContain('integrations/config');
+      expect(call[1].method).toBe('DELETE');
+      const body = JSON.parse(call[1].body);
+      expect(body.provider).toBe('sendgrid');
+      expect(body.config_key).toBe('api_key');
+    });
+
+    it('includes Bearer token', async () => {
+      localStorage.setItem('cgs_access_token', mockToken);
+      mockFetch.mockResolvedValue(mockResponse({ provider: 'sendgrid', config_key: 'api_key', deleted: true }));
+
+      await client.deleteIntegrationConfig({ provider: 'sendgrid', configKey: 'api_key' });
+
+      const headers = mockFetch.mock.calls[0][1].headers as Record<string, string>;
+      expect(headers['Authorization']).toBe(`Bearer ${mockToken}`);
+    });
+
+    it('throws ApiError on failure', async () => {
+      localStorage.setItem('cgs_access_token', mockToken);
+      mockFetch.mockResolvedValue(mockResponse({ error: { message: 'Config not found', status: 404 } }, 404));
+
+      await expect(client.deleteIntegrationConfig({ provider: 'sendgrid', configKey: 'api_key' }))
+        .rejects.toThrow('Config not found');
+    });
+  });
+
 });

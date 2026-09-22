@@ -11,6 +11,11 @@ vi.mock('@/api/client', async (importOriginal) => {
   };
 });
 
+const mockNavigate = vi.fn();
+vi.mock('react-router-dom', () => ({
+  useNavigate: () => mockNavigate,
+}));
+
 vi.mock('@/store', () => ({
   useStore: vi.fn(() => ({
     session: { email: 'founder@test.com', currentRole: 'founder', currentWorkspace: 'internal', activeClinicId: null },
@@ -40,6 +45,7 @@ describe('IntegrationHealthPage', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    mockNavigate.mockClear();
     (getIntegrationHealth as Mock).mockResolvedValue(mockHealth);
     const mod = await import('@/features/internal/integrations/IntegrationHealthPage');
     IntegrationHealthPage = mod.default;
@@ -175,4 +181,32 @@ describe('IntegrationHealthPage', () => {
     expect(serialized).not.toContain('config_value_encrypted');
     expect(serialized).not.toContain('SENDGRID_API_KEY_SECRET');
   });
+
+  it('renders Configure button', async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText('Configure')).toBeInTheDocument();
+    });
+  });
+
+  it('navigates to config page when Configure clicked', async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText('Configure')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText('Configure'));
+    expect(mockNavigate).toHaveBeenCalledWith('/internal/integrations/config');
+  });
+
+  it('shows Configure SendGrid button when no providers configured', async () => {
+    (getIntegrationHealth as Mock).mockResolvedValue(null);
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText('Configure SendGrid')).toBeInTheDocument();
+    });
+  });
+
 });
