@@ -544,4 +544,88 @@ describe('V3.1.2-C2 SendGrid Email Provider', () => {
       expect(serialized).not.toContain('config_value_encrypted');
     });
   });
+
+  // ==================================================================
+  // C2-H1–H4: health check
+  // ==================================================================
+  describe('C2-H1 successful health check', () => {
+    it('returns true on 200 with valid API key', async () => {
+      await seedConfig();
+      mockedHttpRequest.mockResolvedValue(okResponse({}));
+
+      const result = await sendEmailProvider.healthCheck!(DEV_ORG_ID);
+
+      expect(result).toBe(true);
+      expect(mockedHttpRequest).toHaveBeenCalledTimes(1);
+      const { url, options } = callOptions();
+      expect(url).toBe('https://api.sendgrid.com/v3/user/account');
+      expect(options.method).toBe('GET');
+      expect(options.timeoutMs).toBe(5_000);
+      const authHeader = options.headers?.['Authorization'];
+      expect(authHeader).toBe(`Bearer ${TEST_API_KEY}`);
+    });
+  });
+
+  describe('C2-H2 network failure', () => {
+    it('returns false on network error', async () => {
+      await seedConfig();
+      mockedHttpRequest.mockRejectedValue(new Error('connect ECONNREFUSED'));
+
+      const result = await sendEmailProvider.healthCheck!(DEV_ORG_ID);
+
+      expect(result).toBe(false);
+    });
+  });
+
+  describe('C2-H3 timeout', () => {
+    it('returns false on timeout', async () => {
+      await seedConfig();
+      mockedHttpRequest.mockRejectedValue(new HttpError('timed out', 'timeout'));
+
+      const result = await sendEmailProvider.healthCheck!(DEV_ORG_ID);
+
+      expect(result).toBe(false);
+    });
+  });
+
+  describe('C2-H4 4xx/5xx', () => {
+    it('returns false on 401 (invalid credentials)', async () => {
+      await seedConfig();
+      mockedHttpRequest.mockResolvedValue({ status: 401, ok: false, headers: headers({}) });
+
+      const result = await sendEmailProvider.healthCheck!(DEV_ORG_ID);
+
+      expect(result).toBe(false);
+    });
+
+    it('returns false on 403 (insufficient scope)', async () => {
+      await seedConfig();
+      mockedHttpRequest.mockResolvedValue({ status: 403, ok: false, headers: headers({}) });
+
+      const result = await sendEmailProvider.healthCheck!(DEV_ORG_ID);
+
+      expect(result).toBe(false);
+    });
+
+    it('returns false on 503', async () => {
+      await seedConfig();
+      mockedHttpRequest.mockResolvedValue({ status: 503, ok: false, headers: headers({}) });
+
+      const result = await sendEmailProvider.healthCheck!(DEV_ORG_ID);
+
+      expect(result).toBe(false);
+    });
+  });
+
+  describe('C2-H5 no API key configured', () => {
+    it('returns false when api_key is not configured', async () => {
+      await memPool.query(`DELETE FROM integration_configs`);
+      mockedHttpRequest.mockResolvedValue(okResponse({}));
+
+      const result = await sendEmailProvider.healthCheck!(DEV_ORG_ID);
+
+      expect(result).toBe(false);
+      expect(mockedHttpRequest).not.toHaveBeenCalled();
+    });
+  });
 });

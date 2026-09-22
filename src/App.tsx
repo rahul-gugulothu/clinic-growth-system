@@ -16,6 +16,7 @@ import SalesProposalsPage from '@/features/internal/sales/SalesProposalsPage';
 import ReportsPage from '@/features/internal/reports/ReportsPage';
 import FounderAIPage from '@/features/internal/ai/FounderAIPage';
 import AIExecutionsPage from '@/features/internal/ai/AIExecutionsPage';
+import IntegrationHealthPage from '@/features/internal/integrations/IntegrationHealthPage';
 import InternalSettingsPage from '@/features/internal/settings/InternalSettingsPage';
 import ClinicOnboardingPage from '@/features/onboarding/ClinicOnboardingPage';
 import ClinicLayout from '@/layouts/ClinicLayout';
@@ -108,6 +109,7 @@ export default function App() {
           <Route path="reports" element={<ReportsPage />} />
           <Route path="ai" element={<FounderAIPage />} />
           <Route path="ai/executions" element={<AIExecutionsPage />} />
+          <Route path="integrations" element={<IntegrationHealthPage />} />
           <Route path="settings" element={<InternalSettingsPage />} />
         </Route>
         <Route

@@ -2,7 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { z } from 'zod';
 import { requireAuth, getAuthContext, requireRole } from '../middleware/auth.js';
 import { BadRequestError, NotFoundError, ForbiddenError, INTERNAL_ROLES } from '../types/index.js';
-import { getIntegrationEvent, getExecutionEvents, retryIntegrationEvent } from '../services/integrations.js';
+import { getIntegrationEvent, getExecutionEvents, retryIntegrationEvent, getIntegrationProvider } from '../services/integrations.js';
 import { setIntegrationConfig, getIntegrationConfigStatus, deleteIntegrationConfig } from '../services/integrationConfigs.js';
 import { getClient } from '../db/index.js';
 
@@ -182,21 +182,51 @@ router.get(
 
         const integrations: Record<
           string,
-          { configured: boolean; missing_keys: string[] }
+          {
+            configured: boolean;
+            missing_keys: string[];
+            healthy: boolean | null;
+            checked_at: string | null;
+          }
         > = {};
+
+        let allHealthy = true;
 
         for (const provider of Object.keys(providerRequiredKeys)) {
           const required = providerRequiredKeys[provider]!;
           const present = configuredKeys.get(provider) ?? new Set<string>();
           const missing_keys = required.filter((key) => !present.has(key));
 
+          let healthy: boolean | null = false;
+          let checked_at: string | null = null;
+
+            if (missing_keys.length === 0) {
+            const providerInstance = getIntegrationProvider(provider);
+            if (providerInstance?.healthCheck) {
+              try {
+                healthy = await providerInstance.healthCheck(auth.organizationId);
+              } catch {
+                healthy = false;
+              }
+              checked_at = new Date().toISOString();
+            } else {
+              healthy = null;
+            }
+          }
+
+          if (missing_keys.length === 0 && healthy === false) {
+            allHealthy = false;
+          }
+
           integrations[provider] = {
             configured: present.size > 0,
             missing_keys,
+            healthy,
+            checked_at,
           };
         }
 
-        res.status(200).json({ status: 'ok', integrations });
+        res.status(200).json({ status: 'ok', integrations, all_healthy: allHealthy });
       } finally {
         client.release();
       }

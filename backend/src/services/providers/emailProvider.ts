@@ -12,6 +12,7 @@ import type {
 } from '../../types/integrations.js';
 
 const SENDGRID_API_URL = 'https://api.sendgrid.com/v3/mail/send';
+const SENDGRID_ACCOUNT_URL = 'https://api.sendgrid.com/v3/user/account';
 const REQUEST_TIMEOUT_MS = 10_000;
 const PROVIDER = 'sendgrid';
 
@@ -126,13 +127,29 @@ const sendEmailProvider: IntegrationProvider = {
     return true;
   },
 
-  healthCheck: async (): Promise<boolean> => {
+  healthCheck: async (organizationId: string): Promise<boolean> => {
     try {
-      const response = await httpRequest(SENDGRID_API_URL, {
+      const apiKey = await loadConfig(organizationId, 'api_key');
+      if (!apiKey) {
+        return false;
+      }
+
+      const response = await httpRequest(SENDGRID_ACCOUNT_URL, {
         method: 'GET',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+        },
         timeoutMs: 5_000,
       });
-      return response.ok;
+
+      // 200: valid credentials + sufficient scope
+      // 401: invalid / revoked API key
+      // 403: valid API key but insufficient scope for account endpoint
+      // Any other non-2xx: provider connectivity issue
+      if (!response.ok) {
+        return false;
+      }
+      return true;
     } catch {
       return false;
     }

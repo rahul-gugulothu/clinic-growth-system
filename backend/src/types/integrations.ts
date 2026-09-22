@@ -32,7 +32,7 @@ export interface IntegrationProvider {
     event: IntegrationEventRecord;
   }): Promise<IntegrationSendResult>;
   validate(config: Record<string, unknown>): boolean;
-  healthCheck?(): Promise<boolean>;
+   healthCheck?: (organizationId: string) => Promise<boolean>;
 }
 
 export interface CreateIntegrationEventParams {

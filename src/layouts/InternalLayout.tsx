@@ -30,6 +30,7 @@ const NAV = [
   { to: '/internal/reports', label: 'Reports', icon: BarChart3 },
   { to: '/internal/ai', label: 'Founder AI', icon: Sparkles },
   { to: '/internal/ai/executions', label: 'AI Executions', icon: Activity },
+  { to: '/internal/integrations', label: 'Integrations', icon: Send },
   { to: '/internal/settings', label: 'Settings', icon: Settings },
 ];
 

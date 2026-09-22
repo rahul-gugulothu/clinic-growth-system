@@ -8,8 +8,9 @@ import type {
   AiExecutionWithDeliveryStatus,
   AiExecutionWithIntegration,
   AiToolDefinition,
-  AiToolExecutionResult,
-  Pagination,
+   AiToolExecutionResult,
+   IntegrationHealthResponse,
+   Pagination,
 } from '../features/internal/ai/types/api';
 
 const BASE_URL =
@@ -241,6 +242,10 @@ export async function executeAITool(
 export async function listAITools(): Promise<AiToolDefinition[]> {
   const data = await request<{ tools: AiToolDefinition[] }>('ai/tools');
   return data.tools;
+}
+
+export async function getIntegrationHealth(): Promise<IntegrationHealthResponse> {
+  return request<IntegrationHealthResponse>('integrations/health');
 }
 
 export { UNAUTH_EVENT };

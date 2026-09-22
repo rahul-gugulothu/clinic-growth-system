@@ -119,3 +119,16 @@ export interface JwtPayload {
   iat: number;
   exp: number;
 }
+
+export interface IntegrationProviderHealth {
+  configured: boolean;
+  missing_keys: string[];
+  healthy: boolean | null;
+  checked_at: string | null;
+}
+
+export interface IntegrationHealthResponse {
+  status: 'ok';
+  integrations: Record<string, IntegrationProviderHealth>;
+  all_healthy: boolean;
+}

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import { Pool } from 'pg';
 import type { AuthContext } from '../src/types/index.js';
@@ -6,6 +6,14 @@ import { createTestDatabase, type TestDatabase } from './helpers.js';
 import { setPool } from '../src/db/index.js';
 import { createApp } from '../src/app.js';
 import { signAccessToken } from '../src/utils/jwt.js';
+import { httpRequest } from '../src/utils/httpClient.js';
+
+vi.mock('../src/utils/httpClient.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/utils/httpClient.js')>();
+  return { ...actual, httpRequest: vi.fn() };
+});
+
+const mockedHttpRequest = vi.mocked(httpRequest);
 
 const DEV_ORG_ID = '00000000-0000-0000-0000-000000000001';
 const DEV_FOUNDER_ID = '00000000-0000-0000-0000-000000000002';
@@ -100,6 +108,7 @@ describe('V3.1.2-C1-C Integration Config API', () => {
   });
 
   beforeEach(async () => {
+    mockedHttpRequest.mockReset();
     await memPool.query(`DELETE FROM integration_configs`);
   });
 
@@ -401,9 +410,12 @@ describe('V3.1.2-C1-C Integration Config API', () => {
       const res = await getHealth(founderToken);
       expect(res.status).toBe(200);
       expect(res.body.status).toBe('ok');
+      expect(res.body.all_healthy).toBe(true);
       expect(res.body.integrations.sendgrid).toEqual({
         configured: false,
         missing_keys: ['api_key', 'from_email'],
+        healthy: false,
+        checked_at: null,
       });
     });
   });
@@ -421,6 +433,8 @@ describe('V3.1.2-C1-C Integration Config API', () => {
       expect(res.body.integrations.sendgrid).toEqual({
         configured: true,
         missing_keys: ['from_email'],
+        healthy: false,
+        checked_at: null,
       });
     });
   });
@@ -438,12 +452,100 @@ describe('V3.1.2-C1-C Integration Config API', () => {
         config_value: FROM_EMAIL,
       });
 
+      mockedHttpRequest.mockResolvedValue({ status: 200, ok: true, headers: { get: () => null } });
+
       const res = await getHealth(founderToken);
       const serialized = JSON.stringify(res.body);
       expect(serialized).not.toContain(SECRET);
       expect(serialized).not.toContain(FROM_EMAIL);
       expect(serialized).not.toContain('v1:');
       expect(serialized).not.toContain('config_value_encrypted');
+
+      expect(res.body.integrations.sendgrid).toMatchObject({
+        configured: true,
+        missing_keys: [],
+        healthy: true,
+      });
+      expect(res.body.integrations.sendgrid.checked_at).not.toBeNull();
+    });
+  });
+
+  // ==================================================================
+  // C1-C.19 healthCheck: provider health probing
+  // ==================================================================
+  describe('C1-C.19 health calls provider healthCheck when configured', () => {
+    const okHttp = () => ({ status: 200, ok: true, headers: { get: () => null } });
+
+    it('returns healthy=true when provider healthCheck succeeds', async () => {
+      await putConfig(founderToken, { provider: PROVIDER, config_key: 'api_key', config_value: SECRET });
+      await putConfig(founderToken, { provider: PROVIDER, config_key: 'from_email', config_value: FROM_EMAIL });
+      mockedHttpRequest.mockResolvedValue(okHttp());
+
+      const res = await getHealth(founderToken);
+
+      expect(res.status).toBe(200);
+      expect(res.body.integrations.sendgrid.healthy).toBe(true);
+      expect(res.body.integrations.sendgrid.checked_at).not.toBeNull();
+      expect(res.body.all_healthy).toBe(true);
+    });
+
+    it('returns healthy=false when provider healthCheck fails', async () => {
+      await putConfig(founderToken, { provider: PROVIDER, config_key: 'api_key', config_value: SECRET });
+      await putConfig(founderToken, { provider: PROVIDER, config_key: 'from_email', config_value: FROM_EMAIL });
+      mockedHttpRequest.mockResolvedValue({ status: 503, ok: false, headers: { get: () => null } });
+
+      const res = await getHealth(founderToken);
+
+      expect(res.body.integrations.sendgrid.healthy).toBe(false);
+      expect(res.body.all_healthy).toBe(false);
+    });
+
+    it('returns healthy=false on network error', async () => {
+      await putConfig(founderToken, { provider: PROVIDER, config_key: 'api_key', config_value: SECRET });
+      await putConfig(founderToken, { provider: PROVIDER, config_key: 'from_email', config_value: FROM_EMAIL });
+      mockedHttpRequest.mockRejectedValue(new Error('network error'));
+
+      const res = await getHealth(founderToken);
+
+      expect(res.body.integrations.sendgrid.healthy).toBe(false);
+      expect(res.body.all_healthy).toBe(false);
+    });
+
+    it('does not call healthCheck when keys are missing', async () => {
+      mockedHttpRequest.mockResolvedValue(okHttp());
+
+      const res = await getHealth(founderToken);
+
+      expect(res.body.integrations.sendgrid.healthy).toBe(false);
+      expect(res.body.integrations.sendgrid.checked_at).toBeNull();
+      expect(mockedHttpRequest).not.toHaveBeenCalled();
+    });
+
+    it('all_healthy is true when no providers are configured', async () => {
+      const res = await getHealth(founderToken);
+
+      expect(res.body.all_healthy).toBe(true);
+    });
+
+    it('all_healthy is false when any configured provider is unhealthy', async () => {
+      await putConfig(founderToken, { provider: PROVIDER, config_key: 'api_key', config_value: SECRET });
+      await putConfig(founderToken, { provider: PROVIDER, config_key: 'from_email', config_value: FROM_EMAIL });
+      mockedHttpRequest.mockResolvedValue({ status: 500, ok: false, headers: { get: () => null } });
+
+      const res = await getHealth(founderToken);
+
+      expect(res.body.all_healthy).toBe(false);
+    });
+
+    it('health response contains no secrets on provider failure', async () => {
+      await putConfig(founderToken, { provider: PROVIDER, config_key: 'api_key', config_value: SECRET });
+      await putConfig(founderToken, { provider: PROVIDER, config_key: 'from_email', config_value: FROM_EMAIL });
+      mockedHttpRequest.mockRejectedValue(new Error('network error'));
+
+      const res = await getHealth(founderToken);
+      const serialized = JSON.stringify(res.body);
+      expect(serialized).not.toContain(SECRET);
+      expect(serialized).not.toContain(FROM_EMAIL);
     });
   });
 

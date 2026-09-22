@@ -260,4 +260,49 @@ describe('API Client', () => {
       expect(headers['Authorization']).toBe(`Bearer ${mockToken}`);
     });
   });
+
+  describe('getIntegrationHealth', () => {
+    const mockHealth = {
+      status: 'ok',
+      integrations: {
+        sendgrid: {
+          configured: true,
+          missing_keys: [],
+          healthy: true,
+          checked_at: '2024-01-01T10:00:00Z',
+        },
+      },
+      all_healthy: true,
+    };
+
+    it('returns health response', async () => {
+      localStorage.setItem('cgs_access_token', mockToken);
+      mockFetch.mockResolvedValue(mockResponse(mockHealth));
+
+      const result = await client.getIntegrationHealth();
+
+      expect(result).toEqual(mockHealth);
+      expect(mockFetch.mock.calls[0][0]).toContain('integrations/health');
+    });
+
+    it('includes Bearer token', async () => {
+      localStorage.setItem('cgs_access_token', mockToken);
+      mockFetch.mockResolvedValue(mockResponse(mockHealth));
+
+      await client.getIntegrationHealth();
+
+      const call = mockFetch.mock.calls[0];
+      const headers = call[1].headers as Record<string, string>;
+      expect(headers['Authorization']).toBe(`Bearer ${mockToken}`);
+    });
+
+    it('throws ApiError on 401', async () => {
+      localStorage.setItem('cgs_access_token', mockToken);
+      mockFetch.mockResolvedValue(
+        mockResponse({ error: { message: 'Unauthorized', status: 401 } }, 401),
+      );
+
+      await expect(client.getIntegrationHealth()).rejects.toThrow('Unauthorized');
+    });
+  });
 });
