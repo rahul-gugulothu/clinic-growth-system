@@ -3,6 +3,7 @@ export interface HttpRequestOptions {
   headers?: Record<string, string>;
   body?: string;
   timeoutMs?: number;
+  returnBody?: boolean;
 }
 
 export interface HttpResponse {
@@ -11,6 +12,7 @@ export interface HttpResponse {
   headers: {
     get(name: string): string | null;
   };
+  body?: string | null;
 }
 
 export type HttpErrorKind = 'timeout' | 'network';
@@ -95,11 +97,13 @@ export const httpRequest = async (
       signal,
     });
 
-    return {
+    const result: HttpResponse = {
       status: res.status,
       ok: res.ok,
       headers: res.headers,
+      body: options.returnBody ? await res.text() : null,
     };
+    return result;
   } catch (err: unknown) {
     if (isAbortError(err)) {
       throw new HttpError('HTTP request timed out', 'timeout');

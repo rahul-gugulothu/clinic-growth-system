@@ -1,5 +1,6 @@
 import type { z } from 'zod';
 import type { IntegrationEventStatus } from './integrations.js';
+import type { LLMClient } from '../services/llm/client.js';
 
 export type AiExecutionStatus =
   | 'requested'
@@ -16,6 +17,7 @@ export interface AiToolExecutionContext {
   organizationId: string;
   userId: string | null;
   clinicId: string | null;
+  llmClient?: LLMClient;
 }
 
 export interface AiToolContext {

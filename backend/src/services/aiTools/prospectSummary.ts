@@ -1,12 +1,13 @@
 import { z } from 'zod';
 import { getClient } from '../../db/index.js';
-import { NotFoundError, BadRequestError } from '../../types/index.js';
+import { BadRequestError, NotFoundError } from '../../types/index.js';
 import { logger } from '../../utils/logger.js';
 import type {
   AiToolDefinition,
   AiToolExecutionContext,
   AiToolContext,
 } from '../../types/aiTools.js';
+import { LLMError } from '../llm/client.js';
 
 export const TOOL_ID = 'prospect-summary';
 
@@ -82,6 +83,119 @@ function parseProblems(field: unknown): string[] {
   return [];
 }
 
+// LLM response schema for prospect-summary enhancement
+const llmSummarySchema = z.object({
+  researchSummary: z.string().min(1),
+  recommendedNextAction: z.string().min(1),
+});
+
+// Construct LLM prompt from gathered context
+function buildLlmPrompt(
+  prospect: ProspectRow,
+  auditSummary: string | undefined,
+  outreachStatus: string | undefined,
+  proposalStatus: string | undefined
+): string {
+  const facts: string[] = [];
+  if (prospect.specialty) facts.push(prospect.specialty);
+  if (prospect.area) facts.push(prospect.area);
+  if (prospect.google_rating) facts.push(`Google rating ${prospect.google_rating}/5`);
+  if (prospect.review_count) facts.push(`${prospect.review_count} reviews`);
+  if (prospect.booking_available) facts.push('Online booking available');
+  if (prospect.whatsapp_available) facts.push('WhatsApp available');
+  if (prospect.content_quality) facts.push(`Content quality: ${prospect.content_quality}`);
+  if (prospect.visible_advertising) facts.push(`Visible advertising: ${prospect.visible_advertising}`);
+
+  const notesText = prospect.notes ? prospect.notes.slice(0, 300) : 'No notes available';
+
+  return `PROSPECT SUMMARY TASK
+
+Clinic: ${prospect.clinic_name}
+Doctor: ${prospect.doctor_name || 'Unknown'}
+Specialty: ${prospect.specialty || 'Unknown'}
+Area: ${prospect.area || 'Unknown'}
+Priority: ${prospect.priority || 'Unknown'}
+Notes: ${notesText}
+Audit Summary: ${auditSummary || 'No audit data'}
+Outreach Status: ${outreachStatus || 'No outreach yet'}
+Proposal Status: ${proposalStatus || 'No proposals yet'}
+Key Facts: ${facts.join('. ') || 'None'}
+
+Generate a JSON object with exactly these two fields:
+1. "researchSummary": A concise 2-3 sentence summary of this clinic based on all available information (notes, audit, outreach, proposals). Focus on what makes this clinic unique and what the founder should know.
+2. "recommendedNextAction": A specific, actionable next step for the founder to take with this clinic. Reference the clinic by name in your recommendation.
+
+Return ONLY valid JSON. Do not include any text before or after the JSON.`;
+}
+
+// Attempt LLM enhancement with fallback to deterministic logic
+async function enhanceWithLlm(
+  execContext: AiToolExecutionContext,
+  prospect: ProspectRow,
+  auditSummary: string | undefined,
+  outreachStatus: string | undefined,
+  proposalStatus: string | undefined
+): Promise<{ researchSummary: string; recommendedNextAction: string } | undefined> {
+  if (!execContext.llmClient) {
+    return undefined;
+  }
+
+  try {
+    const prompt = buildLlmPrompt(prospect, auditSummary, outreachStatus, proposalStatus);
+
+    const response = await execContext.llmClient.generateCompletion({
+      prompt,
+      systemPrompt: 'You are a helpful assistant that produces structured JSON for a clinic growth system.',
+      maxTokens: 500,
+      temperature: 0.3,
+    });
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(response.content);
+    } catch {
+      logger.warn(
+        { toolId: TOOL_ID, organizationId: execContext.organizationId, prospectId: prospect.id },
+        'LLM response was not valid JSON; falling back to deterministic output'
+      );
+      return undefined;
+    }
+
+    const result = llmSummarySchema.safeParse(parsed);
+    if (!result.success) {
+      logger.warn(
+        {
+          toolId: TOOL_ID,
+          organizationId: execContext.organizationId,
+          prospectId: prospect.id,
+          error: result.error.message,
+        },
+        'LLM response did not match expected schema; falling back to deterministic output'
+      );
+      return undefined;
+    }
+
+    return {
+      researchSummary: result.data.researchSummary,
+      recommendedNextAction: result.data.recommendedNextAction,
+    };
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    const errKind = err instanceof LLMError ? err.kind : 'unknown';
+    logger.warn(
+      {
+        toolId: TOOL_ID,
+        organizationId: execContext.organizationId,
+        prospectId: prospect.id,
+        error: errMsg,
+        errorKind: errKind,
+      },
+      'LLM enhancement failed; falling back to deterministic output'
+    );
+    return undefined;
+  }
+}
+
 export const prospectSummaryTool: AiToolDefinition = {
   id: TOOL_ID,
   name: 'Prospect Summary',
@@ -140,9 +254,10 @@ export const prospectSummaryTool: AiToolDefinition = {
         [prospectId, organizationId]
       );
 
-      const researchSummary = prospect.notes
-        ? prospect.notes.slice(0, 300)
-        : 'No research notes available.';
+      let researchSummary: string =
+        prospect.notes
+          ? prospect.notes.slice(0, 300)
+          : 'No research notes available.';
 
       let auditSummary: string | undefined;
       if (auditsResult.rowCount && auditsResult.rowCount > 0) {
@@ -173,6 +288,19 @@ export const prospectSummaryTool: AiToolDefinition = {
         }
       }
 
+      // V3.1.10: Try LLM enhancement for researchSummary and recommendedNextAction
+      const llmResult = await enhanceWithLlm(
+        execContext,
+        prospect,
+        auditSummary,
+        outreachStatus,
+        proposalStatus
+      );
+
+      if (llmResult) {
+        researchSummary = llmResult.researchSummary;
+      }
+
       let recommendedNextAction =
         'Create audit to understand the clinic better';
       if (outreachResult.rowCount && outreachResult.rowCount > 0) {
@@ -194,6 +322,11 @@ export const prospectSummaryTool: AiToolDefinition = {
       );
       if (acceptedProposal) {
         recommendedNextAction = 'Onboard the clinic';
+      }
+
+      // V3.1.10: If LLM provided a recommendation, use it
+      if (llmResult) {
+        recommendedNextAction = llmResult.recommendedNextAction;
       }
 
       const result: ProspectSummaryResult = {

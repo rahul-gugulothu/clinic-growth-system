@@ -21,6 +21,7 @@ const envSchema = z.object({
     .int()
     .positive()
     .default(30000),
+  LLM_PROVIDER: z.enum(['mock', 'openai']).default('mock'),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -62,6 +63,9 @@ export const config = {
   rateLimit: {
     max: parsed.data.AUTH_RATE_LIMIT_MAX,
     windowMs: parsed.data.AUTH_RATE_LIMIT_WINDOW_MS,
+  },
+  llm: {
+    provider: parsed.data.LLM_PROVIDER,
   },
   integration: {
     encryptionKey: parsed.data.INTEGRATION_ENCRYPTION_KEY ?? null,

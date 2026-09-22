@@ -36,6 +36,7 @@ import { growthOpportunitiesTool } from './aiTools/growthOpportunities.js';
 import { draftWhatsAppTool } from './aiTools/draftWhatsApp.js';
 import { draftEmailTool } from './aiTools/draftEmail.js';
 import { generateProposalTool } from './aiTools/generateProposal.js';
+import { createLLMClient } from './llm/index.js';
 
 export const TOOL_REGISTRY: AiToolDefinition[] = [
   priorityClinicsTool,
@@ -287,6 +288,7 @@ export const executeTool = async (
     organizationId,
     userId,
     clinicId,
+    llmClient: await createLLMClient(organizationId),
   };
 
   const client = await getClient();
