@@ -1,4 +1,4 @@
-import type { UserRole } from './index.js';
+﻿import type { UserRole } from './index.js';
 
 export interface IntegrationEventRecord {
   id: string;
@@ -23,6 +23,12 @@ export interface IntegrationSendResult {
   success: boolean;
   providerMessageId?: string;
   error?: string;
+  retryable?: boolean;
+}
+
+export interface WhatsappPayload {
+  to: string;
+  message: string;
 }
 
 export interface IntegrationProvider {
@@ -85,3 +91,5 @@ export const INTEGRATION_EVENT_STATUS_TRANSITIONS: Record<IntegrationEventStatus
   sent: [],
   failed: [],
 };
+
+

@@ -1,4 +1,4 @@
-import { z } from 'zod';
+﻿import { z } from 'zod';
 import { getClient } from '../db/index.js';
 import {
   BadRequestError,
@@ -396,7 +396,7 @@ export const executeTool = async (
 };
 
 // ==================================================================
-// V3.1.1 — HUMAN APPROVAL WORKFLOW
+// V3.1.1 â€” HUMAN APPROVAL WORKFLOW
 // ==================================================================
 
 export interface ApproveExecutionParams {
@@ -554,7 +554,7 @@ export const approveExecution = async (
     // V3.1.2-C3-B: bridge approved draft-email executions to the integration
     // event system. Only draft-email actions create a SendGrid email event;
     // other approvals leave the integration system untouched. Event creation
-    // uses its own client/transaction (see §7 atomicity limitation).
+    // uses its own client/transaction (see Â§7 atomicity limitation).
     if (record.tool_id === 'draft-email' && record.requires_human_review) {
       const payload = buildDraftEmailIntegrationPayload(record);
       await createIntegrationEvent({
@@ -565,6 +565,28 @@ export const approveExecution = async (
         provider: 'sendgrid',
         eventType: 'email.send',
         payload,
+      });
+    }
+
+    // V3.1.12-A: bridge approved draft-whatsapp executions to a whatsapp.message
+    // integration event. draftWhatsApp returns { channel, recipient, draftText, reasoning }
+    // where recipient is a human-readable prospect name, NOT an E.164 phone number.
+    // The bridge maps recipient -> to and draftText -> message; the whatsapp
+    // provider will reject the payload at validation time (non-E.164 to) and
+    // the event will be classified as a terminal failure, not a retry.
+    if (record.tool_id === 'draft-whatsapp' && record.requires_human_review) {
+      const output = record.result_output ?? {};
+      await createIntegrationEvent({
+        executionId: record.id,
+        organizationId: record.organization_id,
+        userId: params.userId,
+        clinicId: record.clinic_id,
+        provider: 'whatsapp',
+        eventType: 'whatsapp.message',
+        payload: {
+          to: output.recipient ?? '',
+          message: output.draftText ?? '',
+        },
       });
     }
 
@@ -647,3 +669,4 @@ export const rejectExecution = async (
     client.release();
   }
 };
+

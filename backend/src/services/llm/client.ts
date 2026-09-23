@@ -54,99 +54,139 @@ export class OpenAIClient implements LLMClient {
   }
 
   async generateCompletion(request: LLMRequest): Promise<LLMResponse> {
-    const body = JSON.stringify({
-      model: 'gpt-4o-mini',
-      messages: [
-        {
-          role: 'system',
-          content: request.systemPrompt || 'You are a helpful assistant that produces structured JSON.',
-        },
-        { role: 'user', content: request.prompt },
-      ],
-      max_tokens: request.maxTokens ?? 1024,
-      temperature: request.temperature ?? 0.3,
-      response_format: { type: 'json_object' },
-    });
+    const startTime = Date.now();
+    const provider = 'openai';
 
-    let response: HttpResponse;
+    let inputTokens: number | undefined;
+    let outputTokens: number | undefined;
+
     try {
-      response = await httpRequest(OPENAI_ENDPOINT, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body,
-        timeoutMs: DEFAULT_TIMEOUT_MS,
-        returnBody: true,
+      const body = JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: request.systemPrompt || 'You are a helpful assistant that produces structured JSON.',
+          },
+          { role: 'user', content: request.prompt },
+        ],
+        max_tokens: request.maxTokens ?? 1024,
+        temperature: request.temperature ?? 0.3,
+        response_format: { type: 'json_object' },
       });
-    } catch (err) {
-      if (err instanceof HttpError) {
-        if (err.kind === 'timeout') {
-          throw new LLMError('LLM request timed out', 'timeout');
+
+      let response: HttpResponse;
+      try {
+        response = await httpRequest(OPENAI_ENDPOINT, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${this.apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body,
+          timeoutMs: DEFAULT_TIMEOUT_MS,
+          returnBody: true,
+        });
+      } catch (err) {
+        if (err instanceof HttpError) {
+          if (err.kind === 'timeout') {
+            throw new LLMError('LLM request timed out', 'timeout');
+          }
+          throw new LLMError('Network error contacting LLM provider', 'network');
         }
-        throw new LLMError('Network error contacting LLM provider', 'network');
-      }
-      throw new LLMError(
-        err instanceof Error ? err.message : 'Unknown LLM error',
-        'network'
-      );
-    }
-
-    if (response.status !== 200) {
-      logger.warn(
-        {
-          organizationId: this.organizationId,
-          statusCode: response.status,
-          body: response.body,
-        },
-        'OpenAI API returned non-200 response'
-      );
-
-      if (response.status === 401) {
-        throw new LLMError('Invalid LLM API key', 'config_error', 401);
-      }
-      if (response.status === 429) {
-        throw new LLMError('LLM provider rate limited', 'api_error', 429);
-      }
-      if (response.status >= 500) {
         throw new LLMError(
-          `LLM provider server error (status ${response.status})`,
+          err instanceof Error ? err.message : 'Unknown LLM error',
+          'network'
+        );
+      }
+
+      if (response.status !== 200) {
+        logger.warn(
+          {
+            organizationId: this.organizationId,
+            statusCode: response.status,
+            body: response.body,
+          },
+          'OpenAI API returned non-200 response'
+        );
+
+        if (response.status === 401) {
+          throw new LLMError('Invalid LLM API key', 'config_error', 401);
+        }
+        if (response.status === 429) {
+          throw new LLMError('LLM provider rate limited', 'api_error', 429);
+        }
+        if (response.status >= 500) {
+          throw new LLMError(
+            `LLM provider server error (status ${response.status})`,
+            'api_error',
+            response.status
+          );
+        }
+        throw new LLMError(
+          `LLM API error (status ${response.status})`,
           'api_error',
           response.status
         );
       }
-      throw new LLMError(
-        `LLM API error (status ${response.status})`,
-        'api_error',
-        response.status
+
+      if (!response.body) {
+        throw new LLMError('LLM returned empty response', 'api_error');
+      }
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(response.body);
+      } catch {
+        throw new LLMError('LLM returned malformed JSON', 'parse_error');
+      }
+
+      const result = openAIResponseSchema.safeParse(parsed);
+      if (!result.success) {
+        throw new LLMError(
+          'LLM response missing expected fields',
+          'parse_error'
+        );
+      }
+
+      inputTokens = result.data.usage?.prompt_tokens;
+      outputTokens = result.data.usage?.completion_tokens;
+
+      const latencyMs = Date.now() - startTime;
+      logger.info(
+        {
+          provider,
+          organizationId: this.organizationId,
+          success: true,
+          inputTokens,
+          outputTokens,
+          latencyMs,
+        },
+        'LLM call completed'
       );
-    }
 
-    if (!response.body) {
-      throw new LLMError('LLM returned empty response', 'api_error');
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(response.body);
-    } catch {
-      throw new LLMError('LLM returned malformed JSON', 'parse_error');
-    }
-
-    const result = openAIResponseSchema.safeParse(parsed);
-    if (!result.success) {
-      throw new LLMError(
-        'LLM response missing expected fields',
-        'parse_error'
+      return {
+        content: result.data.choices[0].message.content,
+        inputTokens,
+        outputTokens,
+      };
+    } catch (err) {
+      const latencyMs = Date.now() - startTime;
+      const errorKind = err instanceof LLMError ? err.kind : 'unknown';
+      logger.info(
+        {
+          provider,
+          organizationId: this.organizationId,
+          success: false,
+          inputTokens,
+          outputTokens,
+          latencyMs,
+          errorKind,
+        },
+        'LLM call failed'
       );
+      throw err;
     }
-
-    return {
-      content: result.data.choices[0].message.content,
-      inputTokens: result.data.usage?.prompt_tokens,
-      outputTokens: result.data.usage?.completion_tokens,
-    };
   }
 }
 

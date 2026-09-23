@@ -24,6 +24,7 @@ import {
   LLMError,
   createLLMClient,
 } from '../../src/services/llm/client.js';
+import { logger } from '../../src/utils/logger.js';
 
 const mockedHttpRequest = vi.mocked(httpRequest);
 const mockedGetIntegrationConfig = vi.mocked(getIntegrationConfig);
@@ -453,6 +454,76 @@ describe('V3.1.10 LLM Client', () => {
       );
 
       expect(client).toBeInstanceOf(MockLLMClient);
+    });
+  });
+
+  describe('D. Observability', () => {
+    const observabilityClient = new OpenAIClient({
+      apiKey: 'sk-test-openai-key',
+      organizationId: '00000000-0000-0000-0000-000000000001',
+    });
+
+    it('successful OpenAI call logs structured metadata (no prompt/response text)', async () => {
+      const successResponse = {
+        status: 200,
+        ok: true,
+        headers: { get: () => null },
+        body: JSON.stringify({
+          choices: [{ message: { content: '{"result":"ok"}' } }],
+          usage: { prompt_tokens: 50, completion_tokens: 25 },
+        }),
+      } as HttpResponse;
+
+      mockedHttpRequest.mockResolvedValue(successResponse);
+
+      await observabilityClient.generateCompletion({ prompt: 'test' });
+
+      expect(vi.mocked(logger.info)).toHaveBeenCalled();
+      const successCall = vi
+        .mocked(logger.info)
+        .mock.calls.find(
+          (call) => (call[0] as { success?: boolean }).success === true
+        );
+      expect(successCall).toBeDefined();
+      expect(successCall![0]).toMatchObject({
+        provider: 'openai',
+        organizationId: '00000000-0000-0000-0000-000000000001',
+        success: true,
+        inputTokens: 50,
+        outputTokens: 25,
+      });
+      expect(typeof (successCall![0] as { latencyMs: number }).latencyMs).toBe('number');
+      expect((successCall![0] as { errorKind?: string }).errorKind).toBeUndefined();
+    });
+
+    it('failed OpenAI call logs success=false with errorKind (no response text)', async () => {
+      mockedHttpRequest.mockResolvedValue({
+        status: 500,
+        ok: false,
+        headers: { get: () => null },
+        body: 'Internal Server Error',
+      } as HttpResponse);
+
+      await expect(
+        observabilityClient.generateCompletion({ prompt: 'test' })
+      ).rejects.toThrow(LLMError);
+
+      expect(vi.mocked(logger.info)).toHaveBeenCalled();
+      const failureCall = vi
+        .mocked(logger.info)
+        .mock.calls.find(
+          (call) => (call[0] as { success?: boolean }).success === false
+        );
+      expect(failureCall).toBeDefined();
+      expect(failureCall![0]).toMatchObject({
+        provider: 'openai',
+        organizationId: '00000000-0000-0000-0000-000000000001',
+        success: false,
+        errorKind: 'api_error',
+      });
+      expect(typeof (failureCall![0] as { latencyMs: number }).latencyMs).toBe('number');
+      const serialized = JSON.stringify(failureCall![0]);
+      expect(serialized).not.toContain('Internal Server Error');
     });
   });
 });

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { getClient } from '../../db/index.js';
 import { BadRequestError, NotFoundError } from '../../types/index.js';
 import { logger } from '../../utils/logger.js';
+import { LLMError } from '../llm/client.js';
 import type {
   AiToolDefinition,
   AiToolExecutionContext,
@@ -58,6 +59,134 @@ function parseList(field: unknown): string[] {
   return [];
 }
 
+// V3.1.11: LLM response schema for draft-email enhancement. body_type is pinned
+// to "text" to match the deterministic output and SendGrid delivery contract.
+const llmDraftEmailSchema = z.object({
+  subject: z.string().min(1),
+  body: z.string().min(1),
+  body_type: z.literal('text'),
+});
+
+function buildLlmPrompt(
+  prospect: ProspectRow,
+  latestAudit: AuditRow | null
+): string {
+  const facts: string[] = [];
+  if (prospect.specialty) facts.push(`specialty: ${prospect.specialty}`);
+  if (prospect.area) facts.push(`area: ${prospect.area}`);
+  if (prospect.google_rating) {
+    facts.push(`Google rating: ${prospect.google_rating}/5`);
+  }
+  if (prospect.review_count) facts.push(`${prospect.review_count} reviews`);
+  if (prospect.booking_available) facts.push('online booking available');
+  if (prospect.whatsapp_available) facts.push('WhatsApp available');
+  if (prospect.content_quality) {
+    facts.push(`content quality: ${prospect.content_quality}`);
+  }
+  if (prospect.visible_advertising) {
+    facts.push(`visible advertising: ${prospect.visible_advertising}`);
+  }
+
+  const problems = latestAudit
+    ? parseList(latestAudit.identified_problems).join('; ')
+    : 'none identified';
+  const recommendations = latestAudit
+    ? parseList(latestAudit.recommendations).join('; ')
+    : 'none';
+
+  return `PROSPECT OUTREACH EMAIL TASK
+
+Clinic: ${prospect.clinic_name}
+Doctor: ${prospect.doctor_name || 'Unknown'}
+Specialty: ${prospect.specialty || 'Unknown'}
+Area: ${prospect.area || 'Unknown'}
+
+Key facts: ${facts.join('. ') || 'none'}
+Website: ${prospect.website || 'not available'}
+Audit problems: ${problems}
+Audit recommendations: ${recommendations}
+
+Write a concise, professional outreach email to the doctor above from the Clinic Growth team. Reference the clinic by name and include a single, specific call to action for a brief discovery call.
+
+Return ONLY a JSON object with exactly these fields:
+- "subject": a concise professional email subject line
+- "body": the full email body as plain text (no markdown)
+- "body_type": "text"
+
+Do not invent pricing, guarantees, clinical outcomes, or services not listed above. Do not include any text before or after the JSON.`;
+}
+
+async function enhanceWithLlm(
+  execContext: AiToolExecutionContext,
+  prospect: ProspectRow,
+  latestAudit: AuditRow | null
+): Promise<{ subject: string; body: string; body_type: 'text' } | undefined> {
+  if (!execContext.llmClient) {
+    return undefined;
+  }
+
+  try {
+    const prompt = buildLlmPrompt(prospect, latestAudit);
+
+    const response = await execContext.llmClient.generateCompletion({
+      prompt,
+      systemPrompt:
+        'You are a helpful assistant that drafts concise, professional outreach emails for a clinic growth system. Return ONLY valid JSON.',
+      maxTokens: 600,
+      temperature: 0.4,
+    });
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(response.content);
+    } catch {
+      logger.warn(
+        {
+          tool: TOOL_ID,
+          organizationId: execContext.organizationId,
+          prospectId: prospect.id,
+        },
+        'LLM response was not valid JSON; falling back to deterministic draft-email output'
+      );
+      return undefined;
+    }
+
+    const result = llmDraftEmailSchema.safeParse(parsed);
+    if (!result.success) {
+      logger.warn(
+        {
+          tool: TOOL_ID,
+          organizationId: execContext.organizationId,
+          prospectId: prospect.id,
+          error: result.error.message,
+        },
+        'LLM response did not match expected schema; falling back to deterministic draft-email output'
+      );
+      return undefined;
+    }
+
+    return {
+      subject: result.data.subject,
+      body: result.data.body,
+      body_type: 'text',
+    };
+  } catch (err: unknown) {
+    const errKind = err instanceof LLMError ? err.kind : 'unknown';
+    const errMsg = err instanceof Error ? err.message : String(err);
+    logger.warn(
+      {
+        tool: TOOL_ID,
+        organizationId: execContext.organizationId,
+        prospectId: prospect.id,
+        error: errMsg,
+        errorKind: errKind,
+      },
+      'LLM enhancement failed; falling back to deterministic draft-email output'
+    );
+    return undefined;
+  }
+}
+
 export const draftEmailTool: AiToolDefinition = {
   id: TOOL_ID,
   name: 'Draft Email',
@@ -110,7 +239,7 @@ export const draftEmailTool: AiToolDefinition = {
         ? auditsResult.rows[0]
         : null;
 
-      const subject = `Growth Opportunity for ${prospect.clinic_name}`;
+      let subject = `Growth Opportunity for ${prospect.clinic_name}`;
       const recipientName = prospect.doctor_name?.trim();
       const greeting = recipientName ? `Dear ${recipientName}` : 'Hello';
 
@@ -164,6 +293,14 @@ export const draftEmailTool: AiToolDefinition = {
         reasoning += ` Referencing verified audit findings: ${(latestAudit.identified_problems || 'General growth').slice(0, 100)}.`;
       } else {
         reasoning += ' No audit data available, using general outreach template without clinic-specific claims.';
+      }
+
+      // V3.1.11: Try LLM enhancement for subject/body; fall back to the
+      // deterministic template above on any LLM failure or missing client.
+      const llmResult = await enhanceWithLlm(execContext, prospect, latestAudit);
+      if (llmResult) {
+        subject = llmResult.subject;
+        body = llmResult.body;
       }
 
       const result: DraftMessageResult = {

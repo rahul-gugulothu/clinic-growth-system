@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { Pool } from 'pg';
 import request from 'supertest';
 import { BadRequestError, NotFoundError, ForbiddenError } from '../src/types/index.js';
@@ -8,6 +8,7 @@ import { setPool } from '../src/db/index.js';
 import { createApp } from '../src/app.js';
 import { signAccessToken } from '../src/utils/jwt.js';
 import { executeTool, approveExecution, rejectExecution } from '../src/services/aiTools.js';
+import { setIntegrationConfig } from '../src/services/integrationConfigs.js';
 import {
   createIntegrationEvent,
   getIntegrationEvent,
@@ -16,6 +17,14 @@ import {
   retryIntegrationEvent,
 } from '../src/services/integrations.js';
 import type { IntegrationEventRecord } from '../src/types/integrations.js';
+import { httpRequest, HttpError } from '../src/utils/httpClient.js';
+
+vi.mock('../src/utils/httpClient.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/utils/httpClient.js')>();
+  return { ...actual, httpRequest: vi.fn() };
+});
+
+const mockedHttpRequest = vi.mocked(httpRequest);
 
 const DEV_ORG_ID = '00000000-0000-0000-0000-000000000001';
 const DEV_PROSPECT_ID = '00000000-0000-0000-0000-000000000010';
@@ -60,6 +69,24 @@ const EMAIL_PROVIDER = 'email';
 const MOCK_PROVIDER = 'mock';
 const MESSAGE_EVENT_TYPE = 'outbound_message';
 const PROPOSAL_EVENT_TYPE = 'proposal_delivery';
+
+const WHATSAPP_VALID_TO = '+15551234567';
+const WHATSAPP_VALID_MESSAGE = 'Hello from Kaya Clinic!';
+const WHATSAPP_API_TOKEN = 'EA-test-whatsapp-token-123';
+const WHATSAPP_PHONE_ID = '1234567890';
+const WHATSAPP_BA_ID = '9876543210';
+
+type MockHeaders = { get(name: string): string | null };
+const mockHeaders = (entries: Record<string, string | null>): MockHeaders => ({
+  get: (name: string) => entries[name.toLowerCase()] ?? null,
+});
+
+const okResponse = (body: string | null = null, h: Record<string, string | null> = {}) => ({
+  status: 200,
+  ok: true,
+  headers: mockHeaders({ ...h }),
+  body,
+});
 
 describe('V3.1.2-A Integration Events', () => {
   let tdb: TestDatabase;
@@ -1344,6 +1371,314 @@ describe('V3.1.2-A Integration Events', () => {
         .set('Authorization', `Bearer ${clinicOwnerToken}`);
 
       expect(result.status).toBe(403);
+    });
+  });
+
+  // ==================================================================
+  // B. WhatsApp Terminal-Failure Classification
+  // ==================================================================
+
+  describe('B. WhatsApp Terminal-Failure Classification', () => {
+    const seedWhatsappConfig = async () => {
+      await setIntegrationConfig({
+        organizationId: DEV_ORG_ID, provider: WHATSAPP_PROVIDER,
+        configKey: 'api_token', value: WHATSAPP_API_TOKEN,
+      });
+      await setIntegrationConfig({
+        organizationId: DEV_ORG_ID, provider: WHATSAPP_PROVIDER,
+        configKey: 'phone_number_id', value: WHATSAPP_PHONE_ID,
+      });
+      await setIntegrationConfig({
+        organizationId: DEV_ORG_ID, provider: WHATSAPP_PROVIDER,
+        configKey: 'business_account_id', value: WHATSAPP_BA_ID,
+      });
+    };
+
+    const clearWhatsappConfig = async () => {
+      await query(`DELETE FROM integration_configs WHERE provider = 'whatsapp'`);
+    };
+
+    const createWhatsappEvent = async (
+      to: string = WHATSAPP_VALID_TO,
+      message: string = WHATSAPP_VALID_MESSAGE
+    ): Promise<IntegrationEventRecord> => {
+      const execResult = await executeTool(
+        'draft-whatsapp', DEV_ORG_ID, DEV_FOUNDER_ID, null, { prospectId: DEV_PROSPECT_ID }
+      );
+      await approveExecution({
+        executionId: execResult.id,
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        userRole: 'founder',
+        clinicId: null,
+      });
+
+      const events = await query(
+        `SELECT * FROM integration_events
+         WHERE ai_execution_id = $1 AND provider = 'whatsapp' AND event_type = 'whatsapp.message'`,
+        [execResult.id]
+      );
+      expect(events.rows.length).toBe(1);
+
+      let event = events.rows[0];
+      const payload = { to, message };
+      await query(`UPDATE integration_events SET payload = $1 WHERE id = $2`, [
+        JSON.stringify(payload), event.id,
+      ]);
+      event = { ...event, payload } as IntegrationEventRecord;
+
+      return event;
+    };
+
+    const processEvent = (eventId: string) =>
+      processIntegrationEvent({
+        eventId,
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        clinicId: null,
+      });
+
+    const setRetryWindowOpen = async (eventId: string) => {
+      await query(
+        `UPDATE integration_events SET next_retry_at = NOW() - INTERVAL '1 hour' WHERE id = $1`,
+        [eventId]
+      );
+    };
+
+    const getAuditTerminal = async (eventId: string): Promise<boolean | null> => {
+      const rows = await query(
+        `SELECT new_values FROM audit_log
+         WHERE entity = 'integration_event' AND entity_id = $1 AND action = 'integration_failed'
+         ORDER BY created_at DESC LIMIT 1`,
+        [eventId]
+      );
+      if (rows.rows.length === 0) return null;
+      const nv = rows.rows[0].new_values as Record<string, unknown> | null;
+      if (nv === null || !('terminal' in nv)) return null;
+      return Boolean(nv.terminal);
+    };
+
+    beforeEach(async () => {
+      mockedHttpRequest.mockReset();
+      await clearWhatsappConfig();
+    });
+
+    // --- Terminal errors (→ failed, no retry) ---
+
+    it('T.1 non-E.164 phone number (human-readable name) → terminal failure', async () => {
+      const event = await createWhatsappEvent('Dr. Anaya Kaya', WHATSAPP_VALID_MESSAGE);
+
+      const result = await processEvent(event.id);
+
+      expect(result.status).toBe('failed');
+      expect(result.retry_count).toBe(1);
+      expect(result.next_retry_at).toBeNull();
+      expect(result.error_message).toBe('Invalid integration event payload');
+      expect(mockedHttpRequest).not.toHaveBeenCalled();
+      expect(await getAuditTerminal(event.id)).toBe(true);
+    });
+
+    it('T.2 HTTP 401 → terminal failure (auth error)', async () => {
+      await seedWhatsappConfig();
+      mockedHttpRequest.mockResolvedValue({
+        status: 401, ok: false, headers: mockHeaders({}), body: null,
+      });
+
+      const event = await createWhatsappEvent();
+
+      const result = await processEvent(event.id);
+
+      expect(result.status).toBe('failed');
+      expect(result.retry_count).toBe(1);
+      expect(result.next_retry_at).toBeNull();
+      expect(result.error_message).toContain('(status 401)');
+      expect(mockedHttpRequest).toHaveBeenCalledTimes(1);
+      expect(await getAuditTerminal(event.id)).toBe(true);
+    });
+
+    it('T.3 HTTP 403 → terminal failure (forbidden)', async () => {
+      await seedWhatsappConfig();
+      mockedHttpRequest.mockResolvedValue({
+        status: 403, ok: false, headers: mockHeaders({}), body: null,
+      });
+
+      const event = await createWhatsappEvent();
+
+      const result = await processEvent(event.id);
+
+      expect(result.status).toBe('failed');
+      expect(result.retry_count).toBe(1);
+      expect(result.next_retry_at).toBeNull();
+      expect(result.error_message).toContain('(status 403)');
+      expect(mockedHttpRequest).toHaveBeenCalledTimes(1);
+      expect(await getAuditTerminal(event.id)).toBe(true);
+    });
+
+    // --- Retryable errors (→ retry) ---
+
+    it('T.4 HTTP 500 → retry (non-terminal 5xx)', async () => {
+      await seedWhatsappConfig();
+      mockedHttpRequest.mockResolvedValue({
+        status: 500, ok: false, headers: mockHeaders({}), body: null,
+      });
+
+      const event = await createWhatsappEvent();
+
+      const result = await processEvent(event.id);
+
+      expect(result.status).toBe('retry');
+      expect(result.retry_count).toBe(1);
+      expect(result.next_retry_at).not.toBeNull();
+      expect(result.error_message).toContain('(status 500)');
+      expect(mockedHttpRequest).toHaveBeenCalledTimes(1);
+      expect(await getAuditTerminal(event.id)).toBeNull();
+    });
+
+    it('T.5 HTTP 429 → retry (non-terminal 4xx)', async () => {
+      await seedWhatsappConfig();
+      mockedHttpRequest.mockResolvedValue({
+        status: 429, ok: false, headers: mockHeaders({}), body: null,
+      });
+
+      const event = await createWhatsappEvent();
+
+      const result = await processEvent(event.id);
+
+      expect(result.status).toBe('retry');
+      expect(result.retry_count).toBe(1);
+      expect(result.next_retry_at).not.toBeNull();
+      expect(result.error_message).toContain('(status 429)');
+      expect(mockedHttpRequest).toHaveBeenCalledTimes(1);
+    });
+
+    it('T.6 HTTP 400 → retry (non-terminal 4xx, not 401/403)', async () => {
+      await seedWhatsappConfig();
+      mockedHttpRequest.mockResolvedValue({
+        status: 400, ok: false, headers: mockHeaders({}), body: null,
+      });
+
+      const event = await createWhatsappEvent();
+
+      const result = await processEvent(event.id);
+
+      expect(result.status).toBe('retry');
+      expect(result.retry_count).toBe(1);
+      expect(result.next_retry_at).not.toBeNull();
+      expect(result.error_message).toContain('(status 400)');
+      expect(mockedHttpRequest).toHaveBeenCalledTimes(1);
+    });
+
+    it('T.7 HTTP 404 → retry (non-terminal 4xx, not 401/403)', async () => {
+      await seedWhatsappConfig();
+      mockedHttpRequest.mockResolvedValue({
+        status: 404, ok: false, headers: mockHeaders({}), body: null,
+      });
+
+      const event = await createWhatsappEvent();
+
+      const result = await processEvent(event.id);
+
+      expect(result.status).toBe('retry');
+      expect(result.retry_count).toBe(1);
+      expect(result.next_retry_at).not.toBeNull();
+      expect(result.error_message).toContain('(status 404)');
+      expect(mockedHttpRequest).toHaveBeenCalledTimes(1);
+    });
+
+    it('T.8 HTTP timeout → retry (non-terminal network)', async () => {
+      await seedWhatsappConfig();
+      mockedHttpRequest.mockRejectedValue(new HttpError('HTTP request timed out', 'timeout'));
+
+      const event = await createWhatsappEvent();
+
+      const result = await processEvent(event.id);
+
+      expect(result.status).toBe('retry');
+      expect(result.retry_count).toBe(1);
+      expect(result.next_retry_at).not.toBeNull();
+      expect(result.error_message).toBe('WhatsApp request timed out');
+      expect(mockedHttpRequest).toHaveBeenCalledTimes(1);
+    });
+
+    it('T.9 HTTP network error → retry (non-terminal network)', async () => {
+      await seedWhatsappConfig();
+      mockedHttpRequest.mockRejectedValue(new HttpError('HTTP network error', 'network'));
+
+      const event = await createWhatsappEvent();
+
+      const result = await processEvent(event.id);
+
+      expect(result.status).toBe('retry');
+      expect(result.retry_count).toBe(1);
+      expect(result.next_retry_at).not.toBeNull();
+      expect(result.error_message).toBe('Network error contacting WhatsApp');
+      expect(mockedHttpRequest).toHaveBeenCalledTimes(1);
+    });
+
+    // --- Config errors (→ retry, no http call) ---
+
+    it('T.10 missing api_token → retry (non-terminal config, no http call)', async () => {
+      await setIntegrationConfig({
+        organizationId: DEV_ORG_ID, provider: WHATSAPP_PROVIDER,
+        configKey: 'phone_number_id', value: WHATSAPP_PHONE_ID,
+      });
+      await setIntegrationConfig({
+        organizationId: DEV_ORG_ID, provider: WHATSAPP_PROVIDER,
+        configKey: 'business_account_id', value: WHATSAPP_BA_ID,
+      });
+
+      const event = await createWhatsappEvent();
+
+      const result = await processEvent(event.id);
+
+      expect(result.status).toBe('retry');
+      expect(result.retry_count).toBe(1);
+      expect(result.next_retry_at).not.toBeNull();
+      expect(result.error_message).toContain('api_token');
+      expect(mockedHttpRequest).not.toHaveBeenCalled();
+    });
+
+    it('T.11 missing phone_number_id → retry (non-terminal config, no http call)', async () => {
+      await setIntegrationConfig({
+        organizationId: DEV_ORG_ID, provider: WHATSAPP_PROVIDER,
+        configKey: 'api_token', value: WHATSAPP_API_TOKEN,
+      });
+      await setIntegrationConfig({
+        organizationId: DEV_ORG_ID, provider: WHATSAPP_PROVIDER,
+        configKey: 'business_account_id', value: WHATSAPP_BA_ID,
+      });
+
+      const event = await createWhatsappEvent();
+
+      const result = await processEvent(event.id);
+
+      expect(result.status).toBe('retry');
+      expect(result.retry_count).toBe(1);
+      expect(result.next_retry_at).not.toBeNull();
+      expect(result.error_message).toContain('phone_number_id');
+      expect(mockedHttpRequest).not.toHaveBeenCalled();
+    });
+
+    // --- Terminal at retry boundary ---
+
+    it('T.12 terminal error (HTTP 401) at retry_count=3 → failed, retry_count=4, terminal=true', async () => {
+      await seedWhatsappConfig();
+      mockedHttpRequest.mockResolvedValue({
+        status: 401, ok: false, headers: mockHeaders({}), body: null,
+      });
+
+      const event = await createWhatsappEvent();
+      await query(`UPDATE integration_events SET retry_count = 3, status = 'retry' WHERE id = $1`, [event.id]);
+      await setRetryWindowOpen(event.id);
+
+      const result = await processEvent(event.id);
+
+      expect(result.status).toBe('failed');
+      expect(result.retry_count).toBe(4);
+      expect(result.next_retry_at).toBeNull();
+      expect(result.error_message).toContain('(status 401)');
+      expect(mockedHttpRequest).toHaveBeenCalledTimes(1);
+      expect(await getAuditTerminal(event.id)).toBe(true);
     });
   });
 });

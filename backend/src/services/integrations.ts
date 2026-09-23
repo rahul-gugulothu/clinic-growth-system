@@ -1,4 +1,4 @@
-import { getClient } from '../db/index.js';
+﻿import { getClient } from '../db/index.js';
 import { config } from '../config/index.js';
 import {
   BadRequestError,
@@ -11,6 +11,7 @@ import { logAuditEvent } from './audit.js';
 import { logger } from '../utils/logger.js';
 import { mockProvider } from './providers/mockProvider.js';
 import { sendEmailProvider } from './providers/emailProvider.js';
+import { sendWhatsappProvider } from './providers/whatsappProvider.js';
 import type {
   IntegrationEventRecord,
   IntegrationProvider,
@@ -29,6 +30,7 @@ import type { AiToolExecutionRecord } from '../types/aiTools.js';
 const PROVIDER_REGISTRY: Record<string, IntegrationProvider> = {
   mock: mockProvider,
   sendgrid: sendEmailProvider,
+  whatsapp: sendWhatsappProvider,
 };
 
 export const getIntegrationProvider = (
@@ -71,7 +73,7 @@ export const createIntegrationEvent = async (
 
     if (execution.status !== 'approved') {
       throw new BadRequestError(
-        `Cannot create integration event for execution with status '${execution.status}' — status must be 'approved'`
+        `Cannot create integration event for execution with status '${execution.status}' â€” status must be 'approved'`
       );
     }
 
@@ -145,7 +147,7 @@ export const createIntegrationEvent = async (
               eventId: existing.id,
               event: 'integration_event_already_exists',
             },
-            'Integration event already exists — returning existing'
+            'Integration event already exists â€” returning existing'
           );
           return existing;
         }
@@ -349,7 +351,16 @@ export const processIntegrationEvent = async (
     const newRetryCount = event.retry_count + 1;
     const errorMsg = result.error ?? 'Provider error';
 
-    if (newRetryCount > MAX_INTEGRATION_RETRIES) {
+    // Terminal (non-retryable) errors: immediately mark as failed without
+    // scheduling a retry. Covers provider-explicit non-retryable flags
+    // (retryable === false), payload validation rejections ('Invalid
+    // integration event payload'), and HTTP 401/403 auth failures from the
+    // WhatsApp provider (detected via '(status 40X)' in the error string).
+    const isTerminalError = result.retryable === false
+      || errorMsg === 'Invalid integration event payload'
+      || /\(status 40[13]\)/.test(errorMsg);
+
+    if (isTerminalError || newRetryCount > MAX_INTEGRATION_RETRIES) {
       const updateResult = await client.query<IntegrationEventRecord>(
         `UPDATE integration_events
            SET status = 'failed',
@@ -387,6 +398,7 @@ export const processIntegrationEvent = async (
           retry_count: newRetryCount,
           error_message: errorMsg,
           next_retry_at: null,
+          terminal: isTerminalError,
         },
       });
 
@@ -613,3 +625,6 @@ export const processDueIntegrationEvents = async ({
 };
 
 export { INTEGRATION_EVENT_STATUS_TRANSITIONS };
+
+
+

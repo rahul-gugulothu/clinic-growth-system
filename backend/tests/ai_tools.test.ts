@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+﻿import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { Pool } from 'pg';
 import request from 'supertest';
 import { BadRequestError, NotFoundError, ForbiddenError } from '../src/types/index.js';
@@ -663,7 +663,7 @@ describe('V3.1.0-B AI Tools', () => {
           auditId: INVALID_UUID,
         });
       } catch {
-        // expected — we just need the ID for verification
+        // expected â€” we just need the ID for verification
       }
 
       // Query for the failed execution row
@@ -843,7 +843,7 @@ describe('V3.1.0-B AI Tools', () => {
         {}
       );
 
-      // Try to access with org B — should return null
+      // Try to access with org B â€” should return null
       const record = await getExecutionResult(result.id, ORG_B_ID);
       expect(record).toBeNull();
     });
@@ -1539,10 +1539,10 @@ describe('V3.1.0-B AI Tools', () => {
   });
 
   // ==================================================================
-  // Q2. APPROVAL → INTEGRATION EVENT BRIDGE (C3-B)
+  // Q2. APPROVAL â†’ INTEGRATION EVENT BRIDGE (C3-B)
   // ==================================================================
 
-  describe('Q2. Approval → Integration Event Bridge (C3-B)', () => {
+  describe('Q2. Approval â†’ Integration Event Bridge (C3-B)', () => {
     const EMAIL_SENDER = 'dr.anaya.kaya@example.com';
 
     const approveDraftEmail = async (prospectId = DEV_PROSPECT_ID) => {
@@ -1574,6 +1574,15 @@ describe('V3.1.0-B AI Tools', () => {
       const rows = await query(
         `SELECT * FROM integration_events
          WHERE ai_execution_id = $1 AND provider = 'sendgrid' AND event_type = 'email.send'`,
+        [executionId]
+      );
+      return rows.rows;
+    };
+
+    const getWhatsappEventFor = async (executionId: string) => {
+      const rows = await query(
+        `SELECT * FROM integration_events
+         WHERE ai_execution_id = $1 AND provider = 'whatsapp' AND event_type = 'whatsapp.message'`,
         [executionId]
       );
       return rows.rows;
@@ -1758,6 +1767,88 @@ describe('V3.1.0-B AI Tools', () => {
       expect(updated.error_message).toBeNull();
       expect(mockedHttpRequest).toHaveBeenCalledTimes(1);
       expect(mockedHttpRequest.mock.calls[0][0]).toBe('https://api.sendgrid.com/v3/mail/send');
+    });
+
+    it('C3-B.17 approved draft-whatsapp creates exactly one whatsapp.message integration event', async () => {
+      const exec = await executeTool(
+        'draft-whatsapp', DEV_ORG_ID, DEV_FOUNDER_ID, null, { prospectId: DEV_PROSPECT_ID }
+      );
+      await approveExecution({
+        executionId: exec.id, organizationId: DEV_ORG_ID, userId: DEV_FOUNDER_ID,
+        userRole: 'founder', clinicId: null,
+      });
+      const events = await getWhatsappEventFor(exec.id);
+      expect(events).toHaveLength(1);
+    });
+
+    it('C3-B.18 event provider is "whatsapp" and event_type is "whatsapp.message"', async () => {
+      const exec = await executeTool(
+        'draft-whatsapp', DEV_ORG_ID, DEV_FOUNDER_ID, null, { prospectId: DEV_PROSPECT_ID }
+      );
+      await approveExecution({
+        executionId: exec.id, organizationId: DEV_ORG_ID, userId: DEV_FOUNDER_ID,
+        userRole: 'founder', clinicId: null,
+      });
+      const events = await getWhatsappEventFor(exec.id);
+      expect(events[0].provider).toBe('whatsapp');
+      expect(events[0].event_type).toBe('whatsapp.message');
+    });
+
+    it('C3-B.19 event starts with status "pending"', async () => {
+      const exec = await executeTool(
+        'draft-whatsapp', DEV_ORG_ID, DEV_FOUNDER_ID, null, { prospectId: DEV_PROSPECT_ID }
+      );
+      await approveExecution({
+        executionId: exec.id, organizationId: DEV_ORG_ID, userId: DEV_FOUNDER_ID,
+        userRole: 'founder', clinicId: null,
+      });
+      const events = await getWhatsappEventFor(exec.id);
+      expect(events[0].status).toBe('pending');
+    });
+
+    it('C3-B.20 payload maps recipient to "to" and draftText to "message"', async () => {
+      const exec = await executeTool(
+        'draft-whatsapp', DEV_ORG_ID, DEV_FOUNDER_ID, null, { prospectId: DEV_PROSPECT_ID }
+      );
+      await approveExecution({
+        executionId: exec.id, organizationId: DEV_ORG_ID, userId: DEV_FOUNDER_ID,
+        userRole: 'founder', clinicId: null,
+      });
+      const events = await getWhatsappEventFor(exec.id);
+      const payload = events[0].payload;
+      const record = await getExecutionResult(exec.id, DEV_ORG_ID);
+      const output = record!.result_output!;
+      expect(payload).toHaveProperty('to', output.recipient);
+      expect(payload).toHaveProperty('message', output.draftText);
+    });
+
+    it('C3-B.21 payload does NOT contain channel/reasoning', async () => {
+      const exec = await executeTool(
+        'draft-whatsapp', DEV_ORG_ID, DEV_FOUNDER_ID, null, { prospectId: DEV_PROSPECT_ID }
+      );
+      await approveExecution({
+        executionId: exec.id, organizationId: DEV_ORG_ID, userId: DEV_FOUNDER_ID,
+        userRole: 'founder', clinicId: null,
+      });
+      const events = await getWhatsappEventFor(exec.id);
+      const payload = events[0].payload;
+      const serialized = JSON.stringify(payload);
+      expect(payload).not.toHaveProperty('channel');
+      expect(payload).not.toHaveProperty('reasoning');
+      expect(serialized).not.toContain('channel');
+      expect(serialized).not.toContain('reasoning');
+    });
+
+    it('C3-B.22 rejected draft-whatsapp creates no whatsapp event', async () => {
+      const exec = await executeTool(
+        'draft-whatsapp', DEV_ORG_ID, DEV_FOUNDER_ID, null, { prospectId: DEV_PROSPECT_ID }
+      );
+      await rejectExecution({
+        executionId: exec.id, organizationId: DEV_ORG_ID, userId: DEV_FOUNDER_ID,
+        userRole: 'founder', reason: 'Not relevant', clinicId: null,
+      });
+      const events = await getWhatsappEventFor(exec.id);
+      expect(events).toHaveLength(0);
     });
   });
 
@@ -1986,7 +2077,7 @@ describe('V3.1.0-B AI Tools', () => {
       expect(result.approved_at).toBeNull();
     });
 
-    it('Q.1 valid approval: requires_approval → approved', async () => {
+    it('Q.1 valid approval: requires_approval â†’ approved', async () => {
       const execution = await approveExecution({
         executionId: actionExecutionId,
         organizationId: DEV_ORG_ID,
@@ -2000,7 +2091,7 @@ describe('V3.1.0-B AI Tools', () => {
       expect(execution.approved_at).not.toBeNull();
     });
 
-    it('Q.6 already approved: second approve → BadRequestError', async () => {
+    it('Q.6 already approved: second approve â†’ BadRequestError', async () => {
       await expect(
         approveExecution({
           executionId: actionExecutionId,
@@ -2012,7 +2103,7 @@ describe('V3.1.0-B AI Tools', () => {
       ).rejects.toThrow(BadRequestError);
     });
 
-    it('Q.2 valid rejection: requires_approval → rejected', async () => {
+    it('Q.2 valid rejection: requires_approval â†’ rejected', async () => {
       const result = await executeTool(
         'draft-whatsapp',
         DEV_ORG_ID,
@@ -2033,7 +2124,7 @@ describe('V3.1.0-B AI Tools', () => {
       expect(execution.status).toBe('rejected');
     });
 
-    it('Q.7 already rejected: approve rejected execution → BadRequestError', async () => {
+    it('Q.7 already rejected: approve rejected execution â†’ BadRequestError', async () => {
       const result = await executeTool(
         'draft-whatsapp',
         DEV_ORG_ID,
@@ -2086,7 +2177,7 @@ describe('V3.1.0-B AI Tools', () => {
       ).rejects.toThrow(ForbiddenError);
     });
 
-    it('Q.5 completed non-reviewable execution → BadRequestError', async () => {
+    it('Q.5 completed non-reviewable execution â†’ BadRequestError', async () => {
       await expect(
         approveExecution({
           executionId: readOnlyExecutionId,
@@ -2786,7 +2877,7 @@ describe('V3.1.0-B AI Tools', () => {
         expect(item!.latest_integration_status).toBe('pending');
       });
 
-      // G. Multiple integration events — newest by created_at wins
+      // G. Multiple integration events â€” newest by created_at wins
       it('G. latest_integration_status reflects newest event by created_at, not insertion order', async () => {
         const execResult = await executeTool(
           'priority-clinics', DEV_ORG_ID, DEV_FOUNDER_ID, null, {}
@@ -3062,3 +3153,4 @@ describe('V3.1.0-B AI Tools', () => {
     });
   });
 });
+

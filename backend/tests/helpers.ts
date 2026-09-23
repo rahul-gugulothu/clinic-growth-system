@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+﻿import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -15,6 +15,7 @@ export const MIGRATION_FILES = [
   '00004_v312_integration_idempotency.sql',
   '00005_v312_prospect_email.sql',
   '00006_v314_ai_execution_delivery_index.sql',
+  '00007_v313_founder_conversation_memory.sql',
 ] as const;
 
 export interface TestDatabase {
@@ -50,7 +51,7 @@ export const createTestDatabase = (): TestDatabase => {
       returns: DataType.uuid,
       impure: true,
     });
-  });
+   });
 
   // Load and execute migration SQL
   for (const file of MIGRATION_FILES) {
@@ -63,3 +64,4 @@ export const createTestDatabase = (): TestDatabase => {
 };
 
 export { MIGRATIONS_DIR };
+
