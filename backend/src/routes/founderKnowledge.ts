@@ -7,6 +7,8 @@ import {
   getDocument,
   archiveDocument,
   processDocumentUpload,
+  searchDocuments,
+  getDocumentPreview,
 } from '../services/founderKnowledge.js';
 import multer from 'multer';
 
@@ -29,6 +31,14 @@ const listQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
   offset: z.coerce.number().int().min(0).default(0),
   status: z.enum(['uploading', 'processing', 'ready', 'failed', 'archived']).optional(),
+});
+
+const searchQuerySchema = z.object({
+  q: z.string().optional().default(''),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  offset: z.coerce.number().int().min(0).default(0),
+  status: z.enum(['uploading', 'processing', 'ready', 'failed', 'archived']).optional(),
+  includeArchived: z.coerce.boolean().optional().default(false),
 });
 
 router.use(requireAuth);
@@ -80,6 +90,38 @@ router.post(
 );
 
 router.get(
+  '/search',
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const auth = getAuthContext(req);
+      if (!auth) {
+        next(new BadRequestError('Authentication context not found'));
+        return;
+      }
+
+      const parsed = searchQuerySchema.safeParse(req.query);
+      if (!parsed.success) {
+        next(new BadRequestError('Invalid query parameters'));
+        return;
+      }
+
+      const result = await searchDocuments({
+        organizationId: auth.organizationId,
+        query: parsed.data.q,
+        limit: parsed.data.limit,
+        offset: parsed.data.offset,
+        status: parsed.data.status,
+        includeArchived: parsed.data.includeArchived,
+      });
+
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+router.get(
   '/',
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -101,6 +143,38 @@ router.get(
         offset: parsed.data.offset,
         status: parsed.data.status,
       });
+
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+router.get(
+  '/:id/preview',
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const auth = getAuthContext(req);
+      if (!auth) {
+        next(new BadRequestError('Authentication context not found'));
+        return;
+      }
+
+      const idResult = documentIdSchema.safeParse(req.params.id);
+      if (!idResult.success) {
+        next(new BadRequestError('Invalid document ID'));
+        return;
+      }
+
+      const result = await getDocumentPreview({
+        organizationId: auth.organizationId,
+        documentId: idResult.data,
+      });
+
+      if (!result) {
+        throw new NotFoundError('Document not found');
+      }
 
       res.json(result);
     } catch (err) {

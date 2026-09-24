@@ -313,6 +313,9 @@ export const executeTool = async (
        userMessage
      );
      execContext.founderPromptContext = founderPromptContext;
+     if (founderPromptContext.retrievedChunks) {
+       execContext.retrievedChunks = founderPromptContext.retrievedChunks;
+     }
    }
 
    try {

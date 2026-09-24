@@ -1,4 +1,4 @@
-﻿import { readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -17,6 +17,7 @@ export const MIGRATION_FILES = [
   '00006_v314_ai_execution_delivery_index.sql',
   '00007_v313_founder_conversation_memory.sql',
   '00008_v314_knowledge_base.sql',
+  '00009_v314_embeddings.sql',
 ] as const;
 
 export interface TestDatabase {

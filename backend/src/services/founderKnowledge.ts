@@ -11,6 +11,7 @@ import type {
 } from '../types/founderKnowledge.js';
 import { parseDocument } from './documentParser.js';
 import { createChunks } from './chunking.js';
+import { processDocumentEmbeddings } from './embeddingWorker.js';
 
 export interface CreateDocumentParams {
   organizationId: string;
@@ -123,6 +124,10 @@ export async function createDocument(
     );
 
     await client.query('COMMIT');
+
+    processDocumentEmbeddings(documentId, organizationId).catch((err) => {
+      logger.error({ err, documentId, organizationId }, 'Background embedding generation failed');
+    });
 
     logger.info(
       { documentId, organizationId, chunkCount: chunks.length },
@@ -287,4 +292,102 @@ export async function processDocumentUpload(
     fileSize: file.size,
     content: parseResult.text,
   });
+}
+
+export interface SearchDocumentsParams {
+  organizationId: string;
+  query?: string;
+  limit?: number;
+  offset?: number;
+  status?: KnowledgeDocumentStatus;
+  includeArchived?: boolean;
+}
+
+export async function searchDocuments(
+  params: SearchDocumentsParams
+): Promise<KnowledgeDocumentListResponse> {
+  const {
+    organizationId,
+    query = '',
+    limit = 20,
+    offset = 0,
+    status,
+    includeArchived = false,
+  } = params;
+
+  const client = await getClient();
+
+  try {
+    let whereClause = 'WHERE d.organization_id = $1';
+    const values: unknown[] = [organizationId];
+    let paramIndex = 2;
+
+    if (!includeArchived && status !== 'archived') {
+      whereClause += ` AND d.status != 'archived'`;
+    }
+
+    if (status) {
+      whereClause += ` AND d.status = $${paramIndex}`;
+      values.push(status);
+      paramIndex++;
+    }
+
+    if (query.trim().length > 0) {
+      whereClause += ` AND (d.name ILIKE $${paramIndex} OR c.content ILIKE $${paramIndex})`;
+      values.push(`%${query.trim()}%`);
+      paramIndex++;
+    }
+
+    const countQuery = `
+      SELECT COUNT(DISTINCT d.id)::INTEGER as total
+      FROM knowledge_documents d
+      LEFT JOIN knowledge_chunks c ON c.document_id = d.id
+      ${whereClause}
+    `;
+
+    const countResult = await client.query(countQuery, values);
+    const total = countResult.rows[0]?.total ?? 0;
+
+    const dataQuery = `
+      SELECT DISTINCT d.id, d.organization_id, d.name, d.mime_type, d.status,
+             d.file_size, d.chunk_count, d.created_by, d.created_at, d.updated_at, d.archived_at
+      FROM knowledge_documents d
+      LEFT JOIN knowledge_chunks c ON c.document_id = d.id
+      ${whereClause}
+      ORDER BY d.created_at DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+    `;
+
+    const dataResult = await client.query<Record<string, unknown>>(dataQuery, [
+      ...values,
+      limit,
+      offset,
+    ]);
+
+    const documents = dataResult.rows.map(mapDocumentRow);
+
+    return {
+      documents,
+      pagination: {
+        page: Math.floor(offset / limit) + 1,
+        limit,
+        total,
+        hasMore: offset + documents.length < total,
+      },
+    };
+  } finally {
+    client.release();
+  }
+}
+
+export async function getDocumentPreview(
+  params: GetDocumentParams
+): Promise<(KnowledgeDocumentDetailResponse & { previewChunks: KnowledgeChunkRecord[] }) | null> {
+  const detail = await getDocument(params);
+  if (!detail) return null;
+
+  return {
+    ...detail,
+    previewChunks: detail.document.chunks.slice(0, 5),
+  };
 }

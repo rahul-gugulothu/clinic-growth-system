@@ -2,6 +2,7 @@ import type { z } from 'zod';
 import type { IntegrationEventStatus } from './integrations.js';
 import type { LLMClient } from '../services/llm/client.js';
 import type { FounderPromptContext } from './founderMemory.js';
+import type { RetrievedChunk } from './embeddings.js';
 
 export type AiExecutionStatus =
   | 'requested'
@@ -20,6 +21,7 @@ export interface AiToolExecutionContext {
   clinicId: string | null;
   llmClient?: LLMClient;
   founderPromptContext?: FounderPromptContext;
+  retrievedChunks?: RetrievedChunk[];
 }
 
 export interface AiToolContext {

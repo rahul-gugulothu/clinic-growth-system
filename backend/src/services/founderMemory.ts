@@ -541,6 +541,8 @@ export const getConversationContext = async (
   }
 };
 
+import { searchVectorKnowledge, buildFounderRagPrompt, buildCitations, type RetrievedChunk } from './retrieval/index.js';
+
 export const buildFounderPromptContext = async (
   conversationId: string,
   organizationId: string,
@@ -555,6 +557,34 @@ export const buildFounderPromptContext = async (
     DEFAULT_CONTEXT_LIMIT
   );
 
+  let retrievedChunks: RetrievedChunk[] = [];
+  let effectiveSystemPrompt = systemPrompt;
+
+  try {
+    retrievedChunks = await searchVectorKnowledge({
+      organizationId,
+      queryText: latestUserMessage,
+    });
+
+    if (retrievedChunks.length > 0) {
+      const ragPrompt = buildFounderRagPrompt({
+        systemPrompt,
+        chunks: retrievedChunks,
+        historyMessages: history.map((m) => ({ role: m.role, content: m.content })),
+        latestUserMessage,
+      });
+
+      if (ragPrompt.messages[0] && ragPrompt.messages[0].role === 'system') {
+        effectiveSystemPrompt = ragPrompt.messages[0].content;
+      }
+    }
+  } catch (err) {
+    logger.error(
+      { err, organizationId, conversationId },
+      'Failed to retrieve vector knowledge during prompt context building; falling back to memory only'
+    );
+  }
+
   const latestMessage: ConversationMessageRecord = {
     id: '',
     conversation_id: conversationId,
@@ -567,6 +597,7 @@ export const buildFounderPromptContext = async (
   };
 
   const messages = [...history, latestMessage];
+  const citations = buildCitations(retrievedChunks);
 
   logger.info(
     {
@@ -574,12 +605,16 @@ export const buildFounderPromptContext = async (
       organizationId,
       conversationId,
       historyLength: history.length,
+      retrievedChunksCount: retrievedChunks.length,
+      citationsCount: citations.length,
     },
     'Founder prompt context built'
   );
 
   return {
-    systemPrompt,
+    systemPrompt: effectiveSystemPrompt,
     messages,
+    retrievedChunks,
+    citations,
   };
 };

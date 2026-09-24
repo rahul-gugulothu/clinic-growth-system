@@ -22,6 +22,9 @@ const envSchema = z.object({
     .positive()
     .default(30000),
   LLM_PROVIDER: z.enum(['mock', 'openai']).default('mock'),
+  EMBEDDING_PROVIDER: z.enum(['mock', 'openai']).default('mock'),
+  RAG_TOP_K: z.coerce.number().int().positive().default(5),
+  RAG_SIMILARITY_THRESHOLD: z.coerce.number().default(0.75),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -66,6 +69,13 @@ export const config = {
   },
   llm: {
     provider: parsed.data.LLM_PROVIDER,
+  },
+  embedding: {
+    provider: parsed.data.EMBEDDING_PROVIDER,
+  },
+  rag: {
+    topK: parsed.data.RAG_TOP_K,
+    similarityThreshold: parsed.data.RAG_SIMILARITY_THRESHOLD,
   },
   integration: {
     encryptionKey: parsed.data.INTEGRATION_ENCRYPTION_KEY ?? null,

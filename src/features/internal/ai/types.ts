@@ -2,6 +2,14 @@ export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
 
 export type StreamingStatus = 'streaming' | 'complete' | 'cancelled' | 'error';
 
+export interface KnowledgeCitation {
+  documentId: string;
+  documentName: string;
+  chunkIndex: number;
+  similarityScore: number;
+  excerpt: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: MessageRole;
@@ -11,6 +19,7 @@ export interface ChatMessage {
   isStreaming?: boolean;
   streamingStatus?: StreamingStatus;
   toolResult?: AIToolResult;
+  citations?: KnowledgeCitation[];
 }
 
 export interface SuggestionChip {

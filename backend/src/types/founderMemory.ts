@@ -64,7 +64,12 @@ export interface PaginatedConversations {
   };
 }
 
+import type { RetrievedChunk } from './embeddings.js';
+import type { KnowledgeCitation } from '../services/retrieval/citations.js';
+
 export interface FounderPromptContext {
   systemPrompt: string;
   messages: ConversationMessageRecord[];
+  retrievedChunks?: RetrievedChunk[];
+  citations?: KnowledgeCitation[];
 }
