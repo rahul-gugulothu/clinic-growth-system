@@ -13,6 +13,7 @@ export interface HttpResponse {
     get(name: string): string | null;
   };
   body?: string | null;
+  bodyStream?: ReadableStream<Uint8Array> | null;
 }
 
 export type HttpErrorKind = 'timeout' | 'network';
@@ -97,11 +98,13 @@ export const httpRequest = async (
       signal,
     });
 
+    const bodyStream = options.returnBody ? null : res.body;
     const result: HttpResponse = {
       status: res.status,
       ok: res.ok,
       headers: res.headers,
       body: options.returnBody ? await res.text() : null,
+      bodyStream,
     };
     return result;
   } catch (err: unknown) {

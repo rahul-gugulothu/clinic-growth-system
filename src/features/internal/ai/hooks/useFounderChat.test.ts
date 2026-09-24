@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from 'vite
 import { renderHook, act } from '@testing-library/react';
 import { useFounderChat } from './useFounderChat';
 import { executeAITool, approveAIExecution, rejectAIExecution, ApiError } from '@/api/client';
-import type { AiToolExecutionResult } from '@/features/internal/ai/types/api';
+import { WELCOME_MESSAGE } from '../utils/promptTemplates';
+import type { AiToolExecutionResult, FounderConversationMessage } from '@/features/internal/ai/types/api';
 
 vi.mock('@/api/client', () => ({
   executeAITool: vi.fn(),
@@ -117,7 +118,7 @@ describe('useFounderChat', () => {
       expect(apiMocks.executeAITool).toHaveBeenCalledWith('priority-clinics', {
         prospectId: undefined,
         auditId: undefined,
-      });
+      }, undefined);
     });
 
     it('passes prospectId from argument to API context', async () => {
@@ -132,7 +133,7 @@ describe('useFounderChat', () => {
       expect(apiMocks.executeAITool).toHaveBeenCalledWith('priority-clinics', {
         prospectId: 'prospect-1',
         auditId: undefined,
-      });
+      }, undefined);
     });
 
     it('passes auditId from argument to API context', async () => {
@@ -147,7 +148,7 @@ describe('useFounderChat', () => {
       expect(apiMocks.executeAITool).toHaveBeenCalledWith('audit-summary', {
         prospectId: undefined,
         auditId: 'audit-1',
-      });
+      }, undefined);
     });
 
     it('maps backend result to AIToolResult with executionId and status', async () => {
@@ -214,7 +215,7 @@ describe('useFounderChat', () => {
       expect(apiMocks.executeAITool).toHaveBeenCalledWith('priority-clinics', {
         prospectId: undefined,
         auditId: undefined,
-      });
+      }, undefined, 'Which prospects should I prioritize?');
     });
 
     it('adds user message and assistant response to messages', async () => {
@@ -259,6 +260,8 @@ describe('useFounderChat', () => {
       expect(apiMocks.executeAITool).toHaveBeenCalledWith(
         'prospect-summary',
         { prospectId: 'prospect-1', auditId: undefined },
+        undefined,
+        'summarize kaya clinic',
       );
       expect(result.current.context.lastProspectId).toBe('prospect-1');
       expect(result.current.context.lastProspectName).toBe('Kaya Skin Clinic');
@@ -360,6 +363,194 @@ describe('useFounderChat', () => {
       expect(result.current.messages).toHaveLength(1);
       expect(result.current.messages[0].role).toBe('assistant');
       expect(result.current.context).toEqual({});
+    });
+  });
+
+  describe('conversation integration (V3.1.13-C)', () => {
+    const mockConversationId = 'conv-123';
+
+    const mockBackendMessages: FounderConversationMessage[] = [
+      {
+        id: 'msg-1',
+        conversation_id: mockConversationId,
+        organization_id: 'org-1',
+        role: 'user',
+        content: 'What are my priority clinics?',
+        tool_execution_id: null,
+        metadata: {},
+        created_at: '2024-01-01T10:00:00Z',
+      },
+      {
+        id: 'msg-2',
+        conversation_id: mockConversationId,
+        organization_id: 'org-1',
+        role: 'tool',
+        content: 'Tool executed: priority-clinics',
+        tool_execution_id: 'exec-1',
+        metadata: { tool_id: 'priority-clinics', execution_id: 'exec-1', status: 'completed' },
+        created_at: '2024-01-01T10:00:01Z',
+      },
+      {
+        id: 'msg-3',
+        conversation_id: mockConversationId,
+        organization_id: 'org-1',
+        role: 'assistant',
+        content: '**Priority Clinics**\n1. Kaya Skin Clinic (High)',
+        tool_execution_id: 'exec-1',
+        metadata: {},
+        created_at: '2024-01-01T10:00:02Z',
+      },
+    ];
+
+    it('sendMessage passes conversation_id and user_message to executeAITool', async () => {
+      apiMocks.executeAITool.mockResolvedValue(mockExecutionCompleted);
+
+      const { result } = renderHook(() =>
+        useFounderChat(mockStoreData, { conversationId: mockConversationId }),
+      );
+
+      await act(async () => {
+        await result.current.sendMessage('Which prospects should I prioritize?');
+      });
+
+      expect(apiMocks.executeAITool).toHaveBeenCalledWith(
+        'priority-clinics',
+        { prospectId: undefined, auditId: undefined },
+        mockConversationId,
+        'Which prospects should I prioritize?',
+      );
+    });
+
+    it('runTool passes conversation_id to executeAITool', async () => {
+      apiMocks.executeAITool.mockResolvedValue(mockExecutionCompleted);
+
+      const { result } = renderHook(() =>
+        useFounderChat(mockStoreData, { conversationId: mockConversationId }),
+      );
+
+      await act(async () => {
+        await result.current.runTool('priority-clinics');
+      });
+
+      expect(apiMocks.executeAITool).toHaveBeenCalledWith(
+        'priority-clinics',
+        { prospectId: undefined, auditId: undefined },
+        mockConversationId,
+      );
+    });
+
+    it('loads initial messages from conversation context on conversationId change', async () => {
+      const { result } = renderHook(() =>
+        useFounderChat(mockStoreData, {
+          conversationId: mockConversationId,
+          initialMessages: mockBackendMessages,
+        }),
+      );
+
+      const userMessages = result.current.messages.filter((m) => m.role === 'user');
+      const assistantMessages = result.current.messages.filter((m) => m.role === 'assistant');
+      const toolMessages = result.current.messages.filter((m) => m.role === 'tool');
+
+      expect(userMessages).toHaveLength(1);
+      expect(userMessages[0].content).toBe('What are my priority clinics?');
+
+      expect(assistantMessages).toHaveLength(1);
+      expect(assistantMessages[0].content).toContain('Kaya Skin Clinic');
+
+      expect(toolMessages).toHaveLength(1);
+      expect(toolMessages[0].content).toBe('Tool executed: priority-clinics');
+    });
+
+    it('appends tool message after successful tool execution', async () => {
+      apiMocks.executeAITool.mockResolvedValue(mockExecutionCompleted);
+
+      const { result } = renderHook(() =>
+        useFounderChat(mockStoreData, {
+          conversationId: mockConversationId,
+          initialMessages: mockBackendMessages,
+        }),
+      );
+
+      await act(async () => {
+        await result.current.runTool('priority-clinics');
+      });
+
+      const toolMessages = result.current.messages.filter((m) => m.role === 'tool');
+      expect(toolMessages.length).toBeGreaterThan(1);
+
+      const assistantMessages = result.current.messages.filter((m) => m.role === 'assistant');
+      expect(assistantMessages[assistantMessages.length - 1].toolResult).toBeDefined();
+    });
+
+    it('appends assistant message after tool execution in sendMessage', async () => {
+      apiMocks.executeAITool.mockResolvedValue(mockExecutionCompleted);
+
+      const { result } = renderHook(() =>
+        useFounderChat(mockStoreData, {
+          conversationId: mockConversationId,
+          initialMessages: mockBackendMessages,
+        }),
+      );
+
+      await act(async () => {
+        await result.current.sendMessage('Which prospects should I prioritize?');
+      });
+
+      const assistantMessages = result.current.messages.filter((m) => m.role === 'assistant');
+      expect(assistantMessages.length).toBeGreaterThan(1);
+
+      const resultMsg = assistantMessages[assistantMessages.length - 1];
+      expect(resultMsg.toolResult).toBeDefined();
+      expect(resultMsg.toolResult?.toolId).toBe('priority-clinics');
+    });
+
+    it('handles error in tool execution with conversation context', async () => {
+      apiMocks.executeAITool.mockRejectedValue(new ApiError('Tool failed', 500));
+
+      const { result } = renderHook(() =>
+        useFounderChat(mockStoreData, {
+          conversationId: mockConversationId,
+          initialMessages: mockBackendMessages,
+        }),
+      );
+
+      await act(async () => {
+        await result.current.runTool('priority-clinics');
+      });
+
+      const errMsg = result.current.messages[result.current.messages.length - 1];
+      expect(errMsg.role).toBe('assistant');
+      expect(errMsg.content).toContain('Error: Tool failed');
+
+      const toolMsg = result.current.messages[result.current.messages.length - 2];
+      expect(toolMsg.role).toBe('tool');
+    });
+  });
+
+  describe('without conversation context', () => {
+    it('calls executeAITool without conversation_id when not provided', async () => {
+      apiMocks.executeAITool.mockResolvedValue(mockExecutionCompleted);
+
+      const { result } = renderHook(() => useFounderChat(mockStoreData));
+
+      await act(async () => {
+        await result.current.sendMessage('Which prospects should I prioritize?');
+      });
+
+      expect(apiMocks.executeAITool).toHaveBeenCalledWith(
+        'priority-clinics',
+        { prospectId: undefined, auditId: undefined },
+        undefined,
+        'Which prospects should I prioritize?',
+      );
+    });
+
+    it('starts with welcome message when no initialMessages', () => {
+      const { result } = renderHook(() => useFounderChat(mockStoreData));
+
+      expect(result.current.messages).toHaveLength(1);
+      expect(result.current.messages[0].role).toBe('assistant');
+      expect(result.current.messages[0].content).toBe(WELCOME_MESSAGE);
     });
   });
 });

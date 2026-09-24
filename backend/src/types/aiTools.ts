@@ -1,6 +1,7 @@
 import type { z } from 'zod';
 import type { IntegrationEventStatus } from './integrations.js';
 import type { LLMClient } from '../services/llm/client.js';
+import type { FounderPromptContext } from './founderMemory.js';
 
 export type AiExecutionStatus =
   | 'requested'
@@ -18,6 +19,7 @@ export interface AiToolExecutionContext {
   userId: string | null;
   clinicId: string | null;
   llmClient?: LLMClient;
+  founderPromptContext?: FounderPromptContext;
 }
 
 export interface AiToolContext {
@@ -100,3 +102,53 @@ export interface AiExecutionWithDeliveryStatus
   latest_integration_status: IntegrationEventStatus | null;
   has_integration_events: boolean;
 }
+
+// V3.1.13-D: Streaming types
+
+export type StreamEventType =
+  | 'message_start'
+  | 'message_chunk'
+  | 'tool_event'
+  | 'message_complete'
+  | 'error';
+
+export interface StreamBase {
+  type: StreamEventType;
+}
+
+export interface StreamMessageStart extends StreamBase {
+  type: 'message_start';
+  execution_id: string;
+}
+
+export interface StreamMessageChunk extends StreamBase {
+  type: 'message_chunk';
+  content: string;
+  accumulated: string;
+}
+
+export interface StreamToolEvent extends StreamBase {
+  type: 'tool_event';
+  tool_id: string;
+  status: 'running' | 'completed' | 'failed';
+  execution_id?: string;
+  label?: string;
+}
+
+export interface StreamMessageComplete extends StreamBase {
+  type: 'message_complete';
+  content: string;
+}
+
+export interface StreamError extends StreamBase {
+  type: 'error';
+  message: string;
+  kind?: string;
+}
+
+export type StreamEvent =
+  | StreamMessageStart
+  | StreamMessageChunk
+  | StreamToolEvent
+  | StreamMessageComplete
+  | StreamError;

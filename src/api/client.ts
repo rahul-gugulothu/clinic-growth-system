@@ -8,12 +8,19 @@ import type {
   AiExecutionWithDeliveryStatus,
   AiExecutionWithIntegration,
   AiToolDefinition,
-   AiToolExecutionResult,
-   IntegrationHealthResponse,
+  AiToolExecutionResult,
+  IntegrationHealthResponse,
   IntegrationConfigStatus,
   IntegrationConfigSetResponse,
   IntegrationConfigDeleteResponse,
-   Pagination,
+  Pagination,
+  ConversationListResponse,
+  ConversationCreateResponse,
+  ConversationDetailResponse,
+  ConversationRenameResponse,
+  ConversationDeleteResponse,
+  ConversationArchiveResponse,
+  StreamEvent,
 } from '../features/internal/ai/types/api';
 
 const BASE_URL =
@@ -230,13 +237,19 @@ export async function rejectAIExecution(id: string, reason: string): Promise<AiE
 
 export async function executeAITool(
   toolId: string,
-  context: Record<string, unknown> = {}
+  context: Record<string, unknown> = {},
+  conversationId?: string,
+  userMessage?: string,
 ): Promise<AiToolExecutionResult> {
+  const body: Record<string, unknown> = { context };
+  if (conversationId) body.conversation_id = conversationId;
+  if (userMessage) body.user_message = userMessage;
+
   const data = await request<{ execution: AiToolExecutionResult }>(
     `ai/tools/${toolId}`,
     {
       method: 'POST',
-      body: JSON.stringify({ context }),
+      body: JSON.stringify(body),
     }
   );
   return data.execution;
@@ -305,3 +318,136 @@ export async function deleteIntegrationConfig(params: DeleteIntegrationConfigPar
 }
 
 export { UNAUTH_EVENT };
+
+export interface ListConversationsParams {
+  limit?: number;
+  offset?: number;
+  archived?: boolean;
+}
+
+export async function listFounderConversations(params: ListConversationsParams = {}): Promise<ConversationListResponse> {
+  const search = new URLSearchParams();
+  if (params.limit !== undefined) search.set('limit', String(params.limit));
+  if (params.offset !== undefined) search.set('offset', String(params.offset));
+  if (params.archived !== undefined) search.set('archived', String(params.archived));
+
+  const query = search.toString();
+  const path = query ? `founder/conversations?${query}` : 'founder/conversations';
+  return request<ConversationListResponse>(path);
+}
+
+export async function createFounderConversation(): Promise<ConversationCreateResponse> {
+  return request<ConversationCreateResponse>('founder/conversations', {
+    method: 'POST',
+  });
+}
+
+export async function getFounderConversation(conversationId: string): Promise<ConversationDetailResponse> {
+  return request<ConversationDetailResponse>(`founder/conversations/${conversationId}`);
+}
+
+export async function renameFounderConversation(conversationId: string, title: string): Promise<ConversationRenameResponse> {
+  return request<ConversationRenameResponse>(`founder/conversations/${conversationId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ title }),
+  });
+}
+
+export async function archiveFounderConversation(conversationId: string): Promise<ConversationArchiveResponse> {
+  return request<ConversationArchiveResponse>(`founder/conversations/${conversationId}?hard=false`, {
+    method: 'DELETE',
+  });
+}
+
+export async function deleteFounderConversation(conversationId: string): Promise<ConversationDeleteResponse> {
+  return request<ConversationDeleteResponse>(`founder/conversations/${conversationId}?hard=true`, {
+    method: 'DELETE',
+  });
+}
+
+export async function* executeAIToolStream(
+  toolId: string,
+  context: Record<string, unknown> = {},
+  conversationId?: string,
+  userMessage?: string,
+  signal?: AbortSignal,
+): AsyncIterable<StreamEvent> {
+  const body: Record<string, unknown> = { context, stream: true };
+  if (conversationId) body.conversation_id = conversationId;
+  if (userMessage) body.user_message = userMessage;
+
+  const token = getToken();
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  const url = `${BASE_URL}/ai/tools/${toolId}/stream`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers,
+    credentials: 'include',
+    body: JSON.stringify(body),
+    signal,
+  });
+
+  if (!res.ok) {
+    const msg = await extractErrorMessage(res);
+    throw new ApiError(msg, res.status);
+  }
+
+  const textDecoder = new TextDecoder();
+  let buffer = '';
+
+  if (!res.body) {
+    throw new ApiError('No response body from streaming endpoint', 500);
+  }
+
+  const reader = res.body.getReader();
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += textDecoder.decode(value, { stream: true });
+
+      let lineEnd: number;
+      while ((lineEnd = buffer.indexOf('\n\n')) !== -1) {
+        const block = buffer.slice(0, lineEnd).trim();
+        buffer = buffer.slice(lineEnd + 2);
+
+        const lines = block.split('\n');
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith('data: ')) {
+            const jsonStr = trimmed.slice(6).trim();
+            try {
+              const event: StreamEvent = JSON.parse(jsonStr);
+              yield event;
+            } catch {
+              yield {
+                type: 'error',
+                message: 'Failed to parse SSE event',
+                kind: 'parse_error',
+              };
+            }
+          }
+        }
+      }
+    }
+
+    if (buffer.length > 0) {
+      const trimmed = buffer.trim();
+      if (trimmed.startsWith('data: ')) {
+        const jsonStr = trimmed.slice(6).trim();
+        try {
+          const event: StreamEvent = JSON.parse(jsonStr);
+          yield event;
+        } catch {
+          // ignore trailing parse errors
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}

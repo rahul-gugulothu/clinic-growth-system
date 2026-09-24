@@ -7,6 +7,25 @@ export type AiExecutionStatus =
   | 'approved'
   | 'rejected';
 
+export type StreamEventType =
+  | 'message_start'
+  | 'message_chunk'
+  | 'tool_event'
+  | 'message_complete'
+  | 'error';
+
+export interface StreamEvent {
+  type: StreamEventType;
+  content?: string;
+  accumulated?: string;
+  tool_id?: string;
+  status?: 'running' | 'completed' | 'failed';
+  execution_id?: string;
+  label?: string;
+  message?: string;
+  kind?: string;
+}
+
 export type IntegrationEventStatus =
   | 'pending'
   | 'sent'
@@ -149,4 +168,67 @@ export interface IntegrationConfigDeleteResponse {
   provider: string;
   config_key: string;
   deleted: boolean;
+}
+
+export interface FounderConversationSummary {
+  id: string;
+  title: string;
+  clinic_id: string | null;
+  created_at: string;
+  updated_at: string;
+  last_message_preview: string | null;
+  message_count: number;
+}
+
+export interface FounderConversationMessage {
+  id: string;
+  conversation_id: string;
+  organization_id: string;
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string;
+  tool_execution_id: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface FounderConversationRecord {
+  id: string;
+  organization_id: string;
+  user_id: string;
+  clinic_id: string | null;
+  title: string;
+  archived: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationListResponse {
+  conversations: FounderConversationSummary[];
+  pagination: {
+    limit: number;
+    offset: number;
+    total: number;
+  };
+}
+
+export interface ConversationCreateResponse {
+  conversation: FounderConversationRecord;
+}
+
+export interface ConversationDetailResponse {
+  conversation: FounderConversationRecord;
+  messages: FounderConversationMessage[];
+}
+
+export interface ConversationRenameResponse {
+  conversation: FounderConversationRecord;
+}
+
+export interface ConversationDeleteResponse {
+  deleted: boolean;
+}
+
+export interface ConversationArchiveResponse {
+  archived: boolean;
+  conversation: FounderConversationRecord;
 }

@@ -1,20 +1,32 @@
-import { useState, useCallback } from 'react';
-import type { ChatMessage, ConversationContext, ActivityItem, AIToolResult } from '../types';
-import type { AiToolExecutionResult, AiExecutionStatus } from '../types/api';
+import { useState, useCallback, useEffect } from 'react';
+import type { ChatMessage, ConversationContext, ActivityItem, AIToolResult, MessageRole } from '../types';
+import type { AiToolExecutionResult, AiExecutionStatus, FounderConversationMessage } from '../types/api';
 import { WELCOME_MESSAGE } from '../utils/promptTemplates';
 import { getToolForPrompt, resolveProspectFromMessage, getToolResultType, TOOL_BY_ID } from '../tools/toolRegistry';
-import { executeAITool, approveAIExecution, rejectAIExecution, ApiError } from '@/api/client';
+import { executeAITool, executeAIToolStream, approveAIExecution, rejectAIExecution, ApiError } from '@/api/client';
 
 const generateId = () => `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
 const initialMessages: ChatMessage[] = [
   {
     id: 'welcome',
-    role: 'assistant',
+    role: 'assistant' as const,
     content: WELCOME_MESSAGE,
     timestamp: new Date(),
   },
 ];
+
+const mapBackendMessage = (msg: FounderConversationMessage): ChatMessage => ({
+  id: msg.id,
+  role: msg.role as MessageRole,
+  content: msg.content,
+  timestamp: new Date(msg.created_at),
+});
+
+interface UseFounderChatOptions {
+  conversationId?: string;
+  initialMessages?: FounderConversationMessage[];
+}
 
 export function useFounderChat(storeData: {
   prospects: Record<string, unknown>;
@@ -22,12 +34,25 @@ export function useFounderChat(storeData: {
   outreach: Record<string, unknown>;
   proposals: Record<string, unknown>;
   clinics: Record<string, unknown>;
-}) {
+}, options: UseFounderChatOptions = {}) {
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [streamingMessage, setStreamingMessage] = useState('');
+  const [abortController, setAbortController] = useState<AbortController | null>(null);
   const [context, setContext] = useState<ConversationContext>({});
   const [activities, setActivities] = useState<ActivityItem[]>([]);
+
+  useEffect(() => {
+    if (options.initialMessages) {
+      const mapped = options.initialMessages
+        .filter((m) => m.role !== 'system')
+        .map(mapBackendMessage);
+      setMessages(mapped.length > 0 ? mapped : initialMessages);
+    }
+  }, [options.conversationId, options.initialMessages]);
+
 
   const addActivity = useCallback((title: string, description: string, type: ActivityItem['type'] = 'summary') => {
     const newActivity: ActivityItem = {
@@ -107,8 +132,17 @@ export function useFounderChat(storeData: {
       };
 
       try {
-        const execution = await executeAITool(toolId, toolContext);
+        const execution = await executeAITool(toolId, toolContext, options.conversationId);
         const result = mapBackendResult(execution);
+
+        const toolMessage: ChatMessage = {
+          id: generateId(),
+          role: 'tool',
+          content: `Tool executed: ${toolId}`,
+          timestamp: new Date(),
+          toolResult: result,
+        };
+        setMessages((prev) => [...prev.filter((m) => !m.isLoading), toolMessage]);
 
         const responseMessage: ChatMessage = {
           id: generateId(),
@@ -118,9 +152,7 @@ export function useFounderChat(storeData: {
           toolResult: result,
         };
 
-        setMessages((prev) =>
-          prev.map((msg) => (msg.isLoading ? responseMessage : msg)),
-        );
+        setMessages((prev) => [...prev, responseMessage]);
 
         if (result.resultType !== 'error') {
           addActivity(`Ran ${result.toolName}`, result.toolName, result.requiresHumanReview ? 'draft' : 'summary');
@@ -135,6 +167,12 @@ export function useFounderChat(storeData: {
           resultType: 'error',
           data: { message: errorMsg },
         };
+        const toolMessage: ChatMessage = {
+          id: generateId(),
+          role: 'tool',
+          content: `Tool executed: ${toolId}`,
+          timestamp: new Date(),
+        };
         const errorResponse: ChatMessage = {
           id: generateId(),
           role: 'assistant',
@@ -142,14 +180,17 @@ export function useFounderChat(storeData: {
           timestamp: new Date(),
           toolResult: errorResult,
         };
-        setMessages((prev) =>
-          prev.map((msg) => (msg.isLoading ? errorResponse : msg)),
+        setMessages((prev) => [...prev.filter((m) => !m.isLoading), toolMessage, errorResponse]);
+        addActivity(
+          `Error running ${TOOL_BY_ID[toolId]?.name ?? toolId}`,
+          errorMsg,
+          'summary',
         );
       } finally {
         setIsLoading(false);
       }
     },
-    [context, addActivity, mapBackendResult],
+    [context, addActivity, mapBackendResult, options.conversationId],
   );
 
   const sendMessage = useCallback(
@@ -202,8 +243,17 @@ export function useFounderChat(storeData: {
         };
 
         try {
-          const execution = await executeAITool(toolId, toolContext);
+          const execution = await executeAITool(toolId, toolContext, options.conversationId, content.trim());
           const result = mapBackendResult(execution);
+
+          const toolMessage: ChatMessage = {
+            id: generateId(),
+            role: 'tool',
+            content: `Tool executed: ${toolId}`,
+            timestamp: new Date(),
+            toolResult: result,
+          };
+          setMessages((prev) => [...prev.filter((m) => !m.isLoading), toolMessage]);
 
           const responseMessage: ChatMessage = {
             id: generateId(),
@@ -213,9 +263,7 @@ export function useFounderChat(storeData: {
             toolResult: result,
           };
 
-          setMessages((prev) =>
-            prev.map((msg) => (msg.isLoading ? responseMessage : msg)),
-          );
+          setMessages((prev) => [...prev, responseMessage]);
 
           if (result.resultType !== 'error' && prospectMatch) {
             setContext((prev) => ({
@@ -238,6 +286,12 @@ export function useFounderChat(storeData: {
             resultType: 'error',
             data: { message: errorMsg },
           };
+          const toolMessage: ChatMessage = {
+            id: generateId(),
+            role: 'tool',
+            content: `Tool executed: ${toolId}`,
+            timestamp: new Date(),
+          };
           const errorResponse: ChatMessage = {
             id: generateId(),
             role: 'assistant',
@@ -245,9 +299,7 @@ export function useFounderChat(storeData: {
             timestamp: new Date(),
             toolResult: errorResult,
           };
-          setMessages((prev) =>
-            prev.map((msg) => (msg.isLoading ? errorResponse : msg)),
-          );
+          setMessages((prev) => [...prev.filter((m) => !m.isLoading), toolMessage, errorResponse]);
           addActivity(
             `Error running ${TOOL_BY_ID[toolId]?.name ?? toolId}`,
             errorMsg,
@@ -266,7 +318,7 @@ export function useFounderChat(storeData: {
         setMessages((prev) => [...prev, fallbackMessage]);
       }
     },
-    [storeData, context, addActivity, mapBackendResult],
+    [storeData, context, addActivity, mapBackendResult, options.conversationId],
   );
 
   const approveToolExecution = useCallback(
@@ -303,10 +355,277 @@ export function useFounderChat(storeData: {
     [updateMessageExecutionStatus, addActivity],
   );
 
+  const sendMessageStream = useCallback(
+    async (content: string) => {
+      if (!content.trim()) return;
+
+      const prospectMatch = resolveProspectFromMessage(
+        content,
+        storeData.prospects as Record<string, { clinic_name: string; doctor_name: string; prospect_id: string }>,
+      );
+
+      if (prospectMatch) {
+        setContext((prev) => ({
+          ...prev,
+          lastProspectId: prospectMatch.prospectId,
+          lastProspectName: prospectMatch.prospectName,
+          lastAuditId: undefined,
+        }));
+      }
+
+      const userMessage: ChatMessage = {
+        id: generateId(),
+        role: 'user',
+        content: content.trim(),
+        timestamp: new Date(),
+      };
+
+      setMessages((prev) => [...prev, userMessage]);
+      setInputValue('');
+
+      const toolId = getToolForPrompt(content, {
+        prospectId: prospectMatch?.prospectId || context.lastProspectId,
+        prospectName: prospectMatch?.prospectName || context.lastProspectName,
+      });
+
+      if (!toolId) {
+        const fallbackMessage: ChatMessage = {
+          id: generateId(),
+          role: 'assistant',
+          content: "I don't have a tool for that yet. Try asking about your pipeline, prospects, outreach, proposals, or today's priorities.",
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, fallbackMessage]);
+        return;
+      }
+
+      const toolContext = {
+        prospectId: prospectMatch?.prospectId || context.lastProspectId,
+        auditId: context.lastAuditId,
+      };
+
+      setContext((prev) => {
+        if (prospectMatch) {
+          return {
+            ...prev,
+            lastProspectId: prospectMatch.prospectId,
+            lastProspectName: prospectMatch.prospectName,
+          };
+        }
+        return prev;
+      });
+
+      setIsStreaming(true);
+      setStreamingMessage('');
+
+      const abortCtrl = new AbortController();
+      setAbortController(abortCtrl);
+
+      const toolMsgId = generateId();
+      const assistantMsgId = generateId();
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: toolMsgId,
+          role: 'tool',
+          content: `Executing ${toolId}...`,
+          timestamp: new Date(),
+        },
+      ]);
+
+      const streamingExecution = {
+        id: 'streaming',
+        organization_id: '',
+        tool_id: toolId,
+        status: 'completed' as AiExecutionStatus,
+        data: null,
+        requires_human_review: false,
+        duration_ms: null,
+        created_at: new Date().toISOString(),
+        completed_at: null,
+        approved_by: null,
+        approved_at: null,
+      } as AiToolExecutionResult;
+
+      const executionResult = mapBackendResult(streamingExecution);
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: assistantMsgId,
+          role: 'assistant',
+          content: '',
+          timestamp: new Date(),
+          isLoading: true,
+          toolResult: executionResult,
+        },
+      ]);
+
+      try {
+        for await (const event of executeAIToolStream(
+          toolId,
+          toolContext,
+          options.conversationId,
+          content.trim(),
+          abortCtrl.signal,
+        )) {
+          if (event.type === 'message_start') {
+            setStreamingMessage('');
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantMsgId
+                  ? { ...m, content: '', isLoading: false, isStreaming: true, streamingStatus: 'streaming' }
+                  : m,
+              ),
+            );
+          } else if (event.type === 'message_chunk' && event.content) {
+            setStreamingMessage((prev) => prev + event.content);
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantMsgId
+                  ? { ...m, content: event.accumulated ?? (m.content + event.content), isStreaming: true, streamingStatus: 'streaming' }
+                  : m,
+              ),
+            );
+          } else if (event.type === 'tool_event') {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === toolMsgId
+                  ? {
+                      ...m,
+                      content:
+                        event.status === 'completed'
+                          ? `Completed: ${event.tool_id}`
+                          : event.status === 'failed'
+                            ? `Failed: ${event.tool_id}`
+                            : `Executing ${event.tool_id}...`,
+                    }
+                  : m,
+              ),
+            );
+          } else if (event.type === 'message_complete') {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantMsgId
+                  ? { ...m, content: event.content ?? '', isLoading: false, isStreaming: false, streamingStatus: 'complete' }
+                  : m,
+              ),
+            );
+            setIsStreaming(false);
+            setAbortController(null);
+            if (executionResult.resultType !== 'error') {
+              addActivity(`Ran ${executionResult.toolName}`, executionResult.toolName, executionResult.requiresHumanReview ? 'draft' : 'summary');
+            }
+          } else if (event.type === 'error') {
+            const errorMsg = event.message ?? 'Unknown error';
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantMsgId
+                  ? {
+                      ...m,
+                      content: m.content || `Error: ${errorMsg}`,
+                      isLoading: false,
+                      isStreaming: false,
+                      streamingStatus: 'error',
+                      toolResult: { ...executionResult, resultType: 'error', data: { message: errorMsg } },
+                    }
+                  : m,
+              ),
+            );
+            setIsStreaming(false);
+            setAbortController(null);
+            addActivity(`Error running ${TOOL_BY_ID[toolId]?.name ?? toolId}`, errorMsg, 'summary');
+          }
+        }
+      } catch (err) {
+        const errorMsg =
+          err instanceof ApiError ? err.message :
+          err instanceof Error ? err.message : String(err);
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMsgId
+              ? {
+                  ...m,
+                  content: `Error: ${errorMsg}`,
+                  isLoading: false,
+                  isStreaming: false,
+                  streamingStatus: 'error',
+                  toolResult: { ...executionResult, resultType: 'error', data: { message: errorMsg } },
+                }
+              : m,
+          ),
+        );
+        setIsStreaming(false);
+        setAbortController(null);
+        addActivity(`Error running ${TOOL_BY_ID[toolId]?.name ?? toolId}`, errorMsg, 'summary');
+      }
+    },
+    [storeData, context, addActivity, mapBackendResult, options.conversationId],
+  );
+
+  const cancelStreaming = useCallback(() => {
+    if (abortController) {
+      abortController.abort();
+    }
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.isStreaming
+          ? { ...m, isStreaming: false, streamingStatus: 'cancelled' }
+          : m,
+      ),
+    );
+    setIsStreaming(false);
+    setAbortController(null);
+  }, [abortController]);
+
+  const retryStream = useCallback((messageId: string) => {
+    // Find the message to retry and the last user message before it
+    setMessages((prev) => {
+      const messages = [...prev];
+      const message = messages.find((m) => m.id === messageId);
+      if (!message || message.role !== 'assistant') return prev;
+      
+      const assistantIndex = messages.findIndex((m) => m.id === messageId);
+      if (assistantIndex === -1) return prev;
+      
+      // Find the last user message before this assistant message
+      let userMessage: ChatMessage | null = null;
+      for (let i = assistantIndex - 1; i >= 0; i--) {
+        if (messages[i].role === 'user') {
+          userMessage = messages[i];
+          break;
+        }
+      }
+      
+      if (userMessage) {
+        // Remove the failed assistant message and any tool messages after the user message
+        const newMessages = messages.filter((m, idx) => {
+          if (idx > assistantIndex) return false;
+          if (m.id === messageId) return false;
+          return true;
+        });
+        
+        // Trigger a new stream with the user's message content
+        // We use setTimeout to avoid state update issues
+        setTimeout(() => {
+          sendMessageStream(userMessage!.content);
+        }, 0);
+        
+        return newMessages;
+      }
+      
+      return messages;
+    });
+  }, [sendMessageStream]);
+
   const clearChat = useCallback(() => {
     setMessages(initialMessages);
     setInputValue('');
     setIsLoading(false);
+    setIsStreaming(false);
+    setStreamingMessage('');
+    setAbortController(null);
     setContext({});
   }, []);
 
@@ -314,6 +633,11 @@ export function useFounderChat(storeData: {
     messages,
     inputValue,
     isLoading,
+    isStreaming,
+    streamingMessage,
+    sendMessageStream,
+    cancelStreaming,
+    retryStream,
     context,
     activities,
     sendMessage,

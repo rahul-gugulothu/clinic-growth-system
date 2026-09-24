@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
-import { Plus, Star, Activity, Trophy, ArrowLeft } from 'lucide-react';
+import { Star, Activity, Trophy, ArrowLeft } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { MorningBriefCard } from './components/MorningBriefCard';
@@ -10,13 +10,15 @@ import { QuickToolsPanel } from './components/QuickToolsPanel';
 import { ContextSidebar } from './components/ContextSidebar';
 import { ActivityTimeline } from './components/ActivityTimeline';
 import { ActiveContextHeader } from './components/ActiveContextHeader';
+import { ConversationSidebar } from './components/ConversationSidebar';
+import { FounderConversationProvider, useFounderConversation } from './context/FounderConversationContext';
 import { useFounderChat } from './hooks/useFounderChat';
 import { useStore, selectAllProspects, selectAllOutreach, selectAllProposals, selectClinics } from '@/store';
 import { OUTREACH_STAGES } from '@/types/status';
 import { useLocation, useNavigate } from 'react-router-dom';
 import type { FounderAINavigationState } from './types';
 
-export default function FounderAIPage() {
+function FounderAIPageInner() {
   const store = useStore((s) => ({
     prospects: s.prospects,
     audits: s.audits,
@@ -30,19 +32,28 @@ export default function FounderAIPage() {
   const proposals = useStore(selectAllProposals);
   const clinics = useStore(selectClinics);
 
+  const { activeConversation, messages: contextMessages, createConversation } = useFounderConversation();
+
+  const conversationId = activeConversation?.id;
+
   const {
     messages,
     inputValue,
     isLoading,
+    isStreaming,
     context,
-    sendMessage,
+    sendMessageStream,
+    cancelStreaming,
+    retryStream,
     runTool,
     setInputValue,
-    clearChat,
     activities,
     approveToolExecution,
     rejectToolExecution,
-  } = useFounderChat(store);
+  } = useFounderChat(store, {
+    conversationId,
+    initialMessages: activeConversation ? contextMessages : undefined,
+  });
 
   const location = useLocation();
   const navigate = useNavigate();
@@ -86,18 +97,22 @@ export default function FounderAIPage() {
   const handleSend = () => {
     if (inputValue.trim()) {
       setShowWelcome(false);
-      sendMessage(inputValue);
+      sendMessageStream(inputValue);
     }
   };
 
   const handleSuggestionSelect = (prompt: string) => {
     setShowWelcome(false);
-    sendMessage(prompt);
+    sendMessageStream(prompt);
   };
 
   const handleToolSelect = (toolId: string) => {
     setShowWelcome(false);
     runTool(toolId);
+  };
+
+  const handleNewConversation = async () => {
+    await createConversation();
   };
 
   const morningBrief = useMemo(() => {
@@ -206,13 +221,10 @@ export default function FounderAIPage() {
         <p className="text-sm text-muted-foreground">
           Your clinic acquisition copilot.
         </p>
-        <Button variant="outline" onClick={clearChat}>
-          <Plus className="mr-2 h-4 w-4" />
-          New Conversation
-        </Button>
       </div>
 
       <div className="flex flex-1 overflow-hidden">
+        <ConversationSidebar activeConversationId={activeConversation?.id} />
         <QuickToolsPanel onSelectTool={handleToolSelect} selectedProspectId={context.lastProspectId} />
 
         <div className="flex flex-1 flex-col overflow-hidden border-l bg-muted/20">
@@ -221,7 +233,7 @@ export default function FounderAIPage() {
               prospectId={context.lastProspectId}
               prospectName={context.lastProspectName}
               auditId={context.lastAuditId}
-              onClear={clearChat}
+              onClear={handleNewConversation}
             />
           </div>
 
@@ -259,14 +271,29 @@ export default function FounderAIPage() {
                 messages={messages}
                 onApproveExecution={approveToolExecution}
                 onRejectExecution={rejectToolExecution}
+                onRetryStream={retryStream}
               />
+            )}
+
+            {isStreaming && (
+              <div className="flex justify-end px-6 pb-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={cancelStreaming}
+                  className="gap-1.5 text-xs"
+                >
+                  <span className="inline-block h-2 w-2 rounded-full bg-muted-foreground animate-pulse" />
+                  Stop Generating
+                </Button>
+              </div>
             )}
 
             <ChatComposer
               value={inputValue}
               onChange={setInputValue}
               onSend={handleSend}
-              disabled={isLoading}
+              disabled={isLoading || isStreaming}
             />
           </div>
         </div>
@@ -285,5 +312,13 @@ export default function FounderAIPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function FounderAIPage() {
+  return (
+    <FounderConversationProvider>
+      <FounderAIPageInner />
+    </FounderConversationProvider>
   );
 }

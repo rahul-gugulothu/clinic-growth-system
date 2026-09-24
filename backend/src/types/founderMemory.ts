@@ -63,3 +63,8 @@ export interface PaginatedConversations {
     total: number;
   };
 }
+
+export interface FounderPromptContext {
+  systemPrompt: string;
+  messages: ConversationMessageRecord[];
+}

@@ -20,6 +20,12 @@ import type {
   AiExecutionWithIntegration,
   AiExecutionWithDeliveryStatus,
   IntegrationDeliveryEvent,
+  StreamEvent,
+  StreamMessageStart,
+  StreamMessageChunk,
+  StreamToolEvent,
+  StreamMessageComplete,
+  StreamError,
 } from '../types/aiTools.js';
 import type {
   IntegrationEventStatus,
@@ -37,6 +43,8 @@ import { draftWhatsAppTool } from './aiTools/draftWhatsApp.js';
 import { draftEmailTool } from './aiTools/draftEmail.js';
 import { generateProposalTool } from './aiTools/generateProposal.js';
 import { createLLMClient } from './llm/index.js';
+import { addMessage, buildFounderPromptContext } from './founderMemory.js';
+import type { FounderPromptContext } from '../types/founderMemory.js';
 
 export const TOOL_REGISTRY: AiToolDefinition[] = [
   priorityClinicsTool,
@@ -250,7 +258,9 @@ export const executeTool = async (
   organizationId: string,
   userId: string | null,
   clinicId: string | null,
-  rawContext: Record<string, unknown>
+  rawContext: Record<string, unknown>,
+  conversationId?: string,
+  userMessage?: string
 ): Promise<AiToolExecutionResult> => {
   // 1. Validate tool_id
   const tool = TOOL_BY_ID[toolId];
@@ -284,73 +294,130 @@ export const executeTool = async (
     );
   }
 
-  const execContext: AiToolExecutionContext = {
-    organizationId,
-    userId,
-    clinicId,
-    llmClient: await createLLMClient(organizationId),
-  };
+   const execContext: AiToolExecutionContext = {
+     organizationId,
+     userId,
+     clinicId,
+     llmClient: await createLLMClient(organizationId),
+   };
 
-  const client = await getClient();
+   const client = await getClient();
 
-  try {
-    const startedAt = new Date().toISOString();
+   let founderPromptContext: FounderPromptContext | undefined;
+   if (conversationId && userId && userMessage) {
+     founderPromptContext = await buildFounderPromptContext(
+       conversationId,
+       organizationId,
+       userId,
+       'You are a helpful assistant that produces structured JSON.',
+       userMessage
+     );
+     execContext.founderPromptContext = founderPromptContext;
+   }
 
-    // 4. Create execution row with status='requested'
-    const insertResult = await client.query<{
-      id: string;
-      created_at: string;
-    }>(
-      `INSERT INTO ai_tool_executions
-         (organization_id, user_id, clinic_id, tool_id, context, status, started_at, requires_human_review, success)
-       VALUES ($1, $2, $3, $4, $5, 'requested', $6, $7, FALSE)
-       RETURNING id, created_at`,
-      [
-        organizationId,
-        userId ?? null,
-        clinicId ?? null,
-        toolId,
-        JSON.stringify(toolContext),
-        startedAt,
-        tool.human_review_required,
-      ]
-    );
+   try {
+     const startedAt = new Date().toISOString();
 
-    const executionId = insertResult.rows[0].id;
-    const createdAt = insertResult.rows[0].created_at;
+     // 4. Create execution row with status='requested'
+     const insertResult = await client.query<{
+       id: string;
+       created_at: string;
+     }>(
+       `INSERT INTO ai_tool_executions
+          (organization_id, user_id, clinic_id, tool_id, context, status, started_at, requires_human_review, success)
+        VALUES ($1, $2, $3, $4, $5, 'requested', $6, $7, FALSE)
+        RETURNING id, created_at`,
+       [
+         organizationId,
+         userId ?? null,
+         clinicId ?? null,
+         toolId,
+         JSON.stringify(toolContext),
+         startedAt,
+         tool.human_review_required,
+       ]
+     );
 
-    // 5. Move to 'running'
-    await client.query(
-      `UPDATE ai_tool_executions SET status = 'running' WHERE id = $1`,
-      [executionId]
-    );
+     const executionId = insertResult.rows[0].id;
+     const createdAt = insertResult.rows[0].created_at;
 
-    const startTime = Date.now();
+     // 5. Move to 'running'
+     await client.query(
+       `UPDATE ai_tool_executions SET status = 'running' WHERE id = $1`,
+       [executionId]
+     );
 
-    try {
-      // 6. Execute the tool
-      const resultData = await tool.execute(execContext, toolContext);
-      const durationMs = Date.now() - startTime;
-      const completedAt = new Date().toISOString();
+     // V3.1.13-B: Persist the user message to the conversation before tool execution
+     if (conversationId && userId && userMessage) {
+       const systemPrompt = founderPromptContext?.systemPrompt ?? 'You are a helpful assistant.';
+       await addMessage({
+         conversationId,
+         organizationId,
+         role: 'user',
+         content: userMessage,
+         metadata: {
+           tool_id: toolId,
+           execution_id: executionId,
+           system_prompt: systemPrompt,
+         },
+       });
+     }
 
-      // 7. Move to completed or requires_approval
-      const newStatus: AiExecutionStatus = tool.human_review_required
-        ? 'requires_approval'
-        : 'completed';
+     const startTime = Date.now();
 
-      await client.query(
-        `UPDATE ai_tool_executions
-           SET status = $1,
-               completed_at = $2,
-               duration_ms = $3,
-               success = TRUE,
-               result_output = $4,
-               error = NULL
-         WHERE id = $5`,
-        [newStatus, completedAt, durationMs, JSON.stringify(resultData), executionId]
-      );
+     try {
+       // 6. Execute the tool
+       const resultData = await tool.execute(execContext, toolContext);
+       const durationMs = Date.now() - startTime;
+       const completedAt = new Date().toISOString();
 
-      // 8. Return the structured result
+       // 7. Move to completed or requires_approval
+       const newStatus: AiExecutionStatus = tool.human_review_required
+         ? 'requires_approval'
+         : 'completed';
+
+       await client.query(
+         `UPDATE ai_tool_executions
+            SET status = $1,
+                completed_at = $2,
+                duration_ms = $3,
+                success = TRUE,
+                result_output = $4,
+                error = NULL
+          WHERE id = $5`,
+         [newStatus, completedAt, durationMs, JSON.stringify(resultData), executionId]
+       );
+
+       // V3.1.13-B: Persist tool message and assistant message after successful execution
+       if (conversationId && userId) {
+         await addMessage({
+           conversationId,
+           organizationId,
+           role: 'tool',
+           content: `Tool executed: ${toolId}`,
+           toolExecutionId: executionId,
+           metadata: {
+             tool_id: toolId,
+             execution_id: executionId,
+             status: newStatus,
+           },
+         });
+
+         await addMessage({
+           conversationId,
+           organizationId,
+           role: 'assistant',
+           content: JSON.stringify(resultData, null, 2),
+           metadata: {
+             tool_id: toolId,
+             execution_id: executionId,
+             role: 'assistant',
+             status: newStatus,
+           },
+         });
+       }
+
+       // 8. Return the structured result
       return {
         id: executionId,
         organization_id: organizationId,
@@ -364,39 +431,382 @@ export const executeTool = async (
         approved_by: null,
         approved_at: null,
       };
-    } catch (err) {
-      const durationMs = Date.now() - startTime;
-      const completedAt = new Date().toISOString();
-      const errorMsg = err instanceof Error ? err.message : String(err);
+     } catch (err) {
+       const durationMs = Date.now() - startTime;
+       const completedAt = new Date().toISOString();
+       const errorMsg = err instanceof Error ? err.message : String(err);
 
-      // 7b. Move to 'failed'
-      await client.query(
-        `UPDATE ai_tool_executions
-           SET status = 'failed',
-               completed_at = $1,
-               duration_ms = $2,
-               success = FALSE,
-               error = $3
-         WHERE id = $4`,
-        [completedAt, durationMs, errorMsg, executionId]
-      );
+       // 7b. Move to 'failed'
+       await client.query(
+         `UPDATE ai_tool_executions
+            SET status = 'failed',
+                completed_at = $1,
+                duration_ms = $2,
+                success = FALSE,
+                error = $3
+          WHERE id = $4`,
+         [completedAt, durationMs, errorMsg, executionId]
+       );
 
-      logger.error(
-        { err, toolId, executionId, organizationId },
-        'AI tool execution failed'
-      );
+       // V3.1.13-B: Persist tool message and assistant message on failure
+       if (conversationId && userId) {
+         await addMessage({
+           conversationId,
+           organizationId,
+           role: 'tool',
+           content: `Tool executed: ${toolId}`,
+           toolExecutionId: executionId,
+           metadata: {
+             tool_id: toolId,
+             execution_id: executionId,
+             status: 'failed',
+           },
+         }).catch((persistErr) => {
+           logger.error(
+             { persistErr, toolId, executionId, organizationId },
+             'Failed to persist tool message on execution failure'
+           );
+         });
 
-      if (err instanceof BadRequestError) throw err;
-      if (err instanceof NotFoundError) throw err;
-      throw new InternalServerError(`Tool '${toolId}' execution failed: ${errorMsg}`);
-    }
+         await addMessage({
+           conversationId,
+           organizationId,
+           role: 'assistant',
+           content: `Tool '${toolId}' failed: ${errorMsg}`,
+           metadata: {
+             tool_id: toolId,
+             execution_id: executionId,
+             role: 'assistant',
+             status: 'failed',
+           },
+         }).catch((persistErr) => {
+           logger.error(
+             { persistErr, toolId, executionId, organizationId },
+             'Failed to persist assistant message on execution failure'
+           );
+         });
+       }
+
+       logger.error(
+         { err, toolId, executionId, organizationId },
+         'AI tool execution failed'
+       );
+
+       if (err instanceof BadRequestError) throw err;
+       if (err instanceof NotFoundError) throw err;
+       throw new InternalServerError(`Tool '${toolId}' execution failed: ${errorMsg}`);
+     }
   } finally {
     client.release();
   }
 };
 
 // ==================================================================
-// V3.1.1 â€” HUMAN APPROVAL WORKFLOW
+// V3.1.13-D: STREAMING EXECUTION
+// ==================================================================
+
+export interface ExecuteToolStreamParams {
+  toolId: string;
+  organizationId: string;
+  userId: string | null;
+  clinicId: string | null;
+  rawContext: Record<string, unknown>;
+  conversationId?: string;
+  userMessage?: string;
+  signal?: AbortSignal;
+}
+
+export async function* executeToolStream(
+  params: ExecuteToolStreamParams
+): AsyncGenerator<StreamEvent, void, unknown> {
+  const { toolId, organizationId, userId, clinicId, rawContext, conversationId, userMessage, signal } = params;
+
+  // 1. Validate tool_id
+  const tool = TOOL_BY_ID[toolId];
+  if (!tool) {
+    throw new BadRequestError(`Unknown tool: ${toolId}`);
+  }
+
+  // 2. Validate context with Zod
+  const contextParseResult = contextParseSchema.safeParse(rawContext);
+  if (!contextParseResult.success) {
+    throw new BadRequestError('Invalid context: must be an object');
+  }
+
+  const safeContext = contextParseResult.data as AiToolContext;
+  const toolContextResult = tool.context_schema.safeParse(safeContext);
+  if (!toolContextResult.success) {
+    throw new BadRequestError(
+      `Invalid context: ${toolContextResult.error.issues.map((i) => i.message).join(', ')}`
+    );
+  }
+  const toolContext = toolContextResult.data as AiToolContext;
+
+  // 3. Enforce tenant scope
+  if (tool.tenant_scope === 'org' && clinicId !== null) {
+    throw new BadRequestError(`Tool '${toolId}' requires organization-level access`);
+  }
+
+  // 4. Build exec context
+  const execContext: AiToolExecutionContext = {
+    organizationId,
+    userId,
+    clinicId,
+    llmClient: await createLLMClient(organizationId),
+  };
+
+  const client = await getClient();
+
+  let founderPromptContext: FounderPromptContext | undefined;
+  if (conversationId && userId && userMessage) {
+    founderPromptContext = await buildFounderPromptContext(
+      conversationId,
+      organizationId,
+      userId,
+      'You are a helpful assistant that produces structured JSON.',
+      userMessage
+    );
+    execContext.founderPromptContext = founderPromptContext;
+  }
+
+  // 5. Create execution record BEFORE emitting message_start (fixes ordering)
+  const startedAt = new Date().toISOString();
+  const insertResult = await client.query<{
+    id: string;
+    created_at: string;
+  }>(
+    `INSERT INTO ai_tool_executions
+       (organization_id, user_id, clinic_id, tool_id, context, status, started_at, requires_human_review, success)
+     VALUES ($1, $2, $3, $4, $5, 'requested', $6, $7, FALSE)
+     RETURNING id, created_at`,
+    [
+      organizationId,
+      userId ?? null,
+      clinicId ?? null,
+      toolId,
+      JSON.stringify(toolContext),
+      startedAt,
+      tool.human_review_required,
+    ]
+  );
+
+  const executionId = insertResult.rows[0].id;
+  const createdAt = insertResult.rows[0].created_at;
+
+  // 6. Move to 'running'
+  await client.query(
+    `UPDATE ai_tool_executions SET status = 'running' WHERE id = $1`,
+    [executionId]
+  );
+
+  // 7. Emit message_start (now execution record exists)
+  const startEvent: StreamMessageStart = { type: 'message_start', execution_id: executionId };
+  yield startEvent;
+
+  // 8. Check for abort
+  if (signal?.aborted) {
+    const abortEvent: StreamError = { type: 'error', message: 'Stream aborted', kind: 'cancelled' };
+    yield abortEvent;
+    return;
+  }
+
+  // 9. Emit tool_event running
+  const toolStartEvent: StreamToolEvent = {
+    type: 'tool_event',
+    tool_id: toolId,
+    status: 'running',
+    execution_id: executionId,
+  };
+  yield toolStartEvent;
+
+  // 10. Persist the user message
+  if (conversationId && userId && userMessage) {
+    const systemPrompt = founderPromptContext?.systemPrompt ?? 'You are a helpful assistant.';
+    await addMessage({
+      conversationId,
+      organizationId,
+      role: 'user',
+      content: userMessage,
+      metadata: {
+        tool_id: toolId,
+        execution_id: executionId,
+        system_prompt: systemPrompt,
+      },
+    });
+  }
+
+  const startTime = Date.now();
+
+  try {
+    // 11. Execute the tool
+    const resultData = await tool.execute(execContext, toolContext);
+    const durationMs = Date.now() - startTime;
+    const completedAt = new Date().toISOString();
+
+    // 12. Update execution status
+    const newStatus: AiExecutionStatus = tool.human_review_required
+      ? 'requires_approval'
+      : 'completed';
+
+    await client.query(
+      `UPDATE ai_tool_executions
+         SET status = $1,
+             completed_at = $2,
+             duration_ms = $3,
+             success = TRUE,
+             result_output = $4,
+             error = NULL
+       WHERE id = $5`,
+      [newStatus, completedAt, durationMs, JSON.stringify(resultData), executionId]
+    );
+
+    // 13. Persist messages
+    if (conversationId && userId) {
+      await addMessage({
+        conversationId,
+        organizationId,
+        role: 'tool',
+        content: `Tool executed: ${toolId}`,
+        toolExecutionId: executionId,
+        metadata: {
+          tool_id: toolId,
+          execution_id: executionId,
+          status: newStatus,
+        },
+      });
+
+      await addMessage({
+        conversationId,
+        organizationId,
+        role: 'assistant',
+        content: JSON.stringify(resultData, null, 2),
+        metadata: {
+          tool_id: toolId,
+          execution_id: executionId,
+          role: 'assistant',
+          status: newStatus,
+        },
+      });
+    }
+
+    // 14. Stream the result as chunks
+    const resultContent = JSON.stringify(resultData, null, 2);
+    const chunks = splitContentIntoChunks(resultContent, 64);
+    let accumulatedContent = '';
+
+    for (const chunk of chunks) {
+      if (signal?.aborted) {
+        const abortEvent: StreamError = { type: 'error', message: 'Stream aborted', kind: 'cancelled' };
+        yield abortEvent;
+        return;
+      }
+
+      accumulatedContent += chunk;
+
+      const chunkEvent: StreamMessageChunk = {
+        type: 'message_chunk',
+        content: chunk,
+        accumulated: accumulatedContent,
+      };
+      yield chunkEvent;
+    }
+
+    // 15. Emit tool_event completed
+    const toolCompleteEvent: StreamToolEvent = {
+      type: 'tool_event',
+      tool_id: toolId,
+      status: 'completed',
+      execution_id: executionId,
+    };
+    yield toolCompleteEvent;
+
+    // 16. Emit message_complete
+    const completeEvent: StreamMessageComplete = {
+      type: 'message_complete',
+      content: resultContent,
+    };
+    yield completeEvent;
+  } catch (err) {
+    const durationMs = Date.now() - startTime;
+    const completedAt = new Date().toISOString();
+    const errorMsg = err instanceof Error ? err.message : String(err);
+
+    // Update execution as failed
+    await client.query(
+      `UPDATE ai_tool_executions
+         SET status = 'failed',
+             completed_at = $1,
+             duration_ms = $2,
+             success = FALSE,
+             error = $3
+       WHERE id = $4`,
+      [completedAt, durationMs, errorMsg, executionId]
+    );
+
+    // Persist error messages
+    if (conversationId && userId) {
+      await addMessage({
+        conversationId,
+        organizationId,
+        role: 'tool',
+        content: `Tool executed: ${toolId}`,
+        toolExecutionId: executionId,
+        metadata: {
+          tool_id: toolId,
+          execution_id: executionId,
+          status: 'failed',
+        },
+      }).catch((persistErr) => {
+        logger.error(
+          { persistErr, toolId, executionId, organizationId },
+          'Failed to persist tool message on streaming execution failure'
+        );
+      });
+
+      await addMessage({
+        conversationId,
+        organizationId,
+        role: 'assistant',
+        content: `Tool '${toolId}' failed: ${errorMsg}`,
+        metadata: {
+          tool_id: toolId,
+          execution_id: executionId,
+          role: 'assistant',
+          status: 'failed',
+        },
+      }).catch((persistErr) => {
+        logger.error(
+          { persistErr, toolId, executionId, organizationId },
+          'Failed to persist assistant message on streaming execution failure'
+        );
+      });
+    }
+
+    // Emit error event
+    const errorEvent: StreamError = {
+      type: 'error',
+      message: errorMsg,
+      kind: err instanceof BadRequestError ? 'bad_request' : 'execution_error',
+    };
+    yield errorEvent;
+
+    if (err instanceof BadRequestError) throw err;
+    if (err instanceof NotFoundError) throw err;
+    throw new InternalServerError(`Tool '${toolId}' execution failed: ${errorMsg}`);
+  } finally {
+    client.release();
+  }
+}
+
+function splitContentIntoChunks(content: string, chunkSize: number): string[] {
+  const chunks: string[] = [];
+  for (let i = 0; i < content.length; i += chunkSize) {
+    chunks.push(content.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
+
 // ==================================================================
 
 export interface ApproveExecutionParams {

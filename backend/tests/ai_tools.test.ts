@@ -1,16 +1,19 @@
 ﻿import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
-import { Pool } from 'pg';
+import { Pool, type QueryResultRow } from 'pg';
 import request from 'supertest';
 import { BadRequestError, NotFoundError, ForbiddenError } from '../src/types/index.js';
 import type { AuthContext } from '../src/types/index.js';
+import type { StreamEvent } from '../src/types/aiTools.js';
 import { createTestDatabase, type TestDatabase } from './helpers.js';
 import { setPool } from '../src/db/index.js';
 import { createApp } from '../src/app.js';
 import { signAccessToken } from '../src/utils/jwt.js';
+import type { ConversationMessageRecord } from '../src/types/founderMemory.js';
 import {
   listTools,
   getTool,
   executeTool,
+  executeToolStream,
   getExecutionResult,
   approveExecution,
   rejectExecution,
@@ -68,6 +71,10 @@ const userBAuth: AuthContext = {
 const founderToken = signAccessToken(founderAuth);
 const clinicOwnerToken = signAccessToken(clinicOwnerAuth);
 const userBToken = signAccessToken(userBAuth);
+
+const authHeader = (token: string): { Authorization: string } => ({
+  Authorization: `Bearer ${token}`,
+});
 
 describe('V3.1.0-B AI Tools', () => {
   let tdb: TestDatabase;
@@ -205,8 +212,8 @@ describe('V3.1.0-B AI Tools', () => {
     await memPool.end();
   });
 
-  const query = (sql: string, params?: unknown[]) =>
-    params ? memPool.query(sql, params) : memPool.query(sql);
+  const query = <T extends QueryResultRow = QueryResultRow>(sql: string, params?: unknown[]) =>
+    params ? memPool.query<T>(sql, params) : memPool.query<T>(sql);
 
   // ==================================================================
   // A. REGISTRY
@@ -2480,9 +2487,281 @@ describe('V3.1.0-B AI Tools', () => {
               expect(serialized).not.toContain('api_key');
               resolve();
             });
-        });
-      });
     });
+  });
+
+  // ==================================================================
+  // V3.1.13-B: Founder AI Memory Integration
+  // ==================================================================
+  describe('V3.1.13-B Founder AI Memory Integration', () => {
+    const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    const createConversation = async (): Promise<string> => {
+      const res = await request(app)
+        .post('/api/v1/founder/conversations')
+        .set(authHeader(founderToken))
+        .send({});
+      return res.body.conversation.id as string;
+    };
+
+    it('executeTool with conversationId persists user message before execution', async () => {
+      const convId = await createConversation();
+      const userMsg = 'Show me the priority clinics';
+
+      await executeTool(
+        'priority-clinics',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        {},
+        convId,
+        userMsg
+      );
+      await delay(10);
+
+      const res = await request(app)
+        .get(`/api/v1/founder/conversations/${convId}`)
+        .set(authHeader(founderToken));
+
+      const userMessages = res.body.messages.filter((m: ConversationMessageRecord) => m.role === 'user');
+      expect(userMessages).toHaveLength(1);
+      expect(userMessages[0]!.content).toBe(userMsg);
+    });
+
+    it('executeTool with conversationId persists tool message after execution', async () => {
+      const convId = await createConversation();
+
+      const exec = await executeTool(
+        'priority-clinics',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        {},
+        convId,
+        'Show me priority clinics'
+      );
+      await delay(10);
+
+      const res = await request(app)
+        .get(`/api/v1/founder/conversations/${convId}`)
+        .set(authHeader(founderToken));
+
+      const toolMessages = res.body.messages.filter(
+        (m: ConversationMessageRecord) => m.role === 'tool'
+      );
+      expect(toolMessages).toHaveLength(1);
+      expect(toolMessages[0]!.content).toBe('Tool executed: priority-clinics');
+      expect(toolMessages[0]!.tool_execution_id).toBe(exec.id);
+    });
+
+    it('tool message metadata contains tool_id, execution_id, and status', async () => {
+      const convId = await createConversation();
+
+      const exec = await executeTool(
+        'priority-clinics',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        {},
+        convId,
+        'Show me priority clinics'
+      );
+      await delay(10);
+
+      const toolMsgRes = await query(
+        `SELECT metadata FROM founder_conversation_messages
+         WHERE conversation_id = $1 AND role = 'tool'`,
+        [convId]
+      );
+
+      const metadata = (toolMsgRes.rows[0] as { metadata: Record<string, unknown> }).metadata;
+      expect(metadata.tool_id).toBe('priority-clinics');
+      expect(metadata.execution_id).toBe(exec.id);
+      expect(metadata.status).toBe('completed');
+    });
+
+    it('executeTool with conversationId persists assistant message after execution', async () => {
+      const convId = await createConversation();
+
+      await executeTool(
+        'priority-clinics',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        {},
+        convId,
+        'Show me priority clinics'
+      );
+      await delay(10);
+
+      const res = await request(app)
+        .get(`/api/v1/founder/conversations/${convId}`)
+        .set(authHeader(founderToken));
+
+      const assistantMessages = res.body.messages.filter(
+        (m: ConversationMessageRecord) => m.role === 'assistant'
+      );
+      expect(assistantMessages).toHaveLength(1);
+      expect(assistantMessages[0]!.content).toContain('clinics');
+      expect(assistantMessages[0]!.metadata?.tool_id).toBe('priority-clinics');
+    });
+
+    it('does not persist messages when conversationId is not provided', async () => {
+      const result = await executeTool(
+        'priority-clinics',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        {}
+      );
+
+      const res = await query(
+        `SELECT COUNT(*)::int AS count FROM founder_conversation_messages
+         WHERE tool_execution_id = $1`,
+        [result.id]
+      );
+
+      expect((res.rows[0] as { count: number }).count).toBe(0);
+    });
+
+    it('persists tool message with status "requires_approval" for human-review tools', async () => {
+      const convId = await createConversation();
+
+      const exec = await executeTool(
+        'draft-whatsapp',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        { prospectId: DEV_PROSPECT_ID },
+        convId,
+        'Draft a whatsapp message'
+      );
+      await delay(10);
+
+      const res = await request(app)
+        .get(`/api/v1/founder/conversations/${convId}`)
+        .set(authHeader(founderToken));
+
+      const toolMessages = res.body.messages.filter(
+        (m: ConversationMessageRecord) => m.role === 'tool'
+      );
+      expect(toolMessages).toHaveLength(1);
+      expect(toolMessages[0]!.content).toBe('Tool executed: draft-whatsapp');
+      expect(toolMessages[0]!.metadata?.status).toBe('requires_approval');
+      expect(toolMessages[0]!.tool_execution_id).toBe(exec.id);
+    });
+
+    it('persists user message and tool message in correct order', async () => {
+      const convId = await createConversation();
+
+      await executeTool(
+        'priority-clinics',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        {},
+        convId,
+        'first user message'
+      );
+      await delay(10);
+
+      const res = await request(app)
+        .get(`/api/v1/founder/conversations/${convId}`)
+        .set(authHeader(founderToken));
+
+      const roles = res.body.messages.map((m: ConversationMessageRecord) => m.role);
+      expect(roles).toEqual(['user', 'tool', 'assistant']);
+      expect(res.body.messages[0]!.content).toBe('first user message');
+      expect(res.body.messages[1]!.content).toBe('Tool executed: priority-clinics');
+      expect(res.body.messages[2]!.role).toBe('assistant');
+    });
+
+    it('persists tool and assistant messages on tool failure', async () => {
+      const convId = await createConversation();
+
+      await expect(
+        executeTool(
+          'draft-whatsapp',
+          DEV_ORG_ID,
+          DEV_FOUNDER_ID,
+          null,
+          { prospectId: INVALID_UUID },
+          convId,
+          'trigger failure'
+        )
+      ).rejects.toThrow();
+      await delay(10);
+
+      const res = await request(app)
+        .get(`/api/v1/founder/conversations/${convId}`)
+        .set(authHeader(founderToken));
+
+      const toolMessages = res.body.messages.filter(
+        (m: ConversationMessageRecord) => m.role === 'tool'
+      );
+      const assistantMessages = res.body.messages.filter(
+        (m: ConversationMessageRecord) => m.role === 'assistant'
+      );
+
+      expect(toolMessages).toHaveLength(1);
+      expect(toolMessages[0]!.content).toBe('Tool executed: draft-whatsapp');
+      expect(toolMessages[0]!.metadata?.status).toBe('failed');
+
+      expect(assistantMessages).toHaveLength(1);
+      expect(assistantMessages[0]!.content).toContain('failed');
+    });
+
+    it('auto-titles conversation from first user message during tool execution', async () => {
+      const convId = await createConversation();
+
+      await executeTool(
+        'priority-clinics',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        {},
+        convId,
+        'What are my priority clinics today?'
+      );
+      await delay(10);
+
+      const detail = await request(app)
+        .get(`/api/v1/founder/conversations/${convId}`)
+        .set(authHeader(founderToken));
+
+      expect(detail.body.conversation.title).toBe('What are my priority clinics today');
+    });
+
+    it('updates conversation updated_at when messages are persisted', async () => {
+      const convId = await createConversation();
+
+      const before = await query<{ updated_at: string }>(
+        `SELECT updated_at FROM founder_conversations WHERE id = $1`,
+        [convId]
+      );
+
+      await delay(15);
+
+      await executeTool(
+        'priority-clinics',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        null,
+        {},
+        convId,
+        'Show priority'
+      );
+      await delay(10);
+
+      const after = await query<{ updated_at: string }>(
+        `SELECT updated_at FROM founder_conversations WHERE id = $1`,
+        [convId]
+      );
+
+      expect(after.rows[0].updated_at).not.toBe(before.rows[0].updated_at);
+    });
+  });
+});
 
     describe('POST /api/v1/ai/tools/:toolId', () => {
       it('returns 401 without JWT', async () => {
@@ -3150,6 +3429,159 @@ describe('V3.1.0-B AI Tools', () => {
         expect(result.status).toBe(200);
         expect(result.body.execution.status).toBe('rejected');
       });
+    });
+  });
+
+  // ==================================================================
+  // D-STREAM: V3.1.13-D Streaming Execution
+  // ==================================================================
+
+  describe('V3.1.13-D Streaming Execution', () => {
+    it('emitStreamEvents emits message_start, tool_event, chunks, message_complete in order', async () => {
+      const events: StreamEvent[] = [];
+
+      const generator = executeToolStream({
+        toolId: 'priority-clinics',
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        clinicId: null,
+        rawContext: {},
+      });
+
+      for await (const event of generator) {
+        events.push(event);
+        if (events.length > 50) break;
+      }
+
+      expect(events[0].type).toBe('message_start');
+
+      const toolStartEvent = events.find((e) => e.type === 'tool_event' && e.status === 'running');
+      expect(toolStartEvent).toBeDefined();
+
+      const chunkEvents = events.filter((e) => e.type === 'message_chunk');
+      expect(chunkEvents.length).toBeGreaterThan(0);
+
+      const toolCompleteEvent = events.find((e) => e.type === 'tool_event' && e.status === 'completed');
+      expect(toolCompleteEvent).toBeDefined();
+
+      const completeEvent = events.find((e) => e.type === 'message_complete');
+      expect(completeEvent).toBeDefined();
+    });
+
+    it('message_start event is the first event', async () => {
+      const generator = executeToolStream({
+        toolId: 'priority-clinics',
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        clinicId: null,
+        rawContext: {},
+      });
+
+      const iterator = generator[Symbol.asyncIterator]();
+      const first = await iterator.next();
+      expect(first.value?.type).toBe('message_start');
+    });
+
+    it('message_complete event contains full result data', async () => {
+      const generator = executeToolStream({
+        toolId: 'priority-clinics',
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        clinicId: null,
+        rawContext: {},
+      });
+
+      let completeEvent: { type: string; content: string } | undefined;
+      for await (const event of generator) {
+        if (event.type === 'message_complete') {
+          completeEvent = event as { type: string; content: string };
+          break;
+        }
+      }
+      expect(completeEvent).toBeDefined();
+      expect(completeEvent!.content).toBeTruthy();
+    });
+
+    it('emits tool_event with status completed after streaming', async () => {
+      const generator = executeToolStream({
+        toolId: 'priority-clinics',
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        clinicId: null,
+        rawContext: {},
+      });
+
+      const events: StreamEvent[] = [];
+      for await (const event of generator) {
+        events.push(event);
+        if (event.type === 'message_complete') break;
+        if (events.length > 100) break;
+      }
+
+      const completed = events.find((e) => e.type === 'tool_event' && e.status === 'completed');
+      expect(completed).toBeDefined();
+    });
+
+    it('aborts stream when abort signal fires', async () => {
+      const abortController = new AbortController();
+      const generator = executeToolStream({
+        toolId: 'priority-clinics',
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        clinicId: null,
+        rawContext: {},
+        signal: abortController.signal,
+      });
+
+      const collected: StreamEvent[] = [];
+      for await (const event of generator) {
+        collected.push(event);
+        if (event.type === 'error' && event.message === 'Stream aborted') break;
+        if (collected.length > 100) break;
+      }
+
+      if (abortController.signal.aborted) {
+        const abortError = collected.find((e) => e.type === 'error');
+        expect(abortError).toBeDefined();
+      }
+    });
+
+    it('SSE chunk ordering: tool_event running comes before message_chunk', async () => {
+      const generator = executeToolStream({
+        toolId: 'priority-clinics',
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        clinicId: null,
+        rawContext: {},
+      });
+
+      const events: StreamEvent[] = [];
+      for await (const event of generator) {
+        events.push(event);
+        if (event.type === 'message_complete') break;
+        if (events.length > 100) break;
+      }
+
+      const toolStartIdx = events.findIndex((e) => e.type === 'tool_event' && e.status === 'running');
+      const firstChunkIdx = events.findIndex((e) => e.type === 'message_chunk');
+      expect(toolStartIdx).toBeGreaterThanOrEqual(0);
+      expect(firstChunkIdx).toBeGreaterThan(toolStartIdx);
+    });
+
+    it('unknown tool ID throws BadRequestError in streaming', async () => {
+      const generator = executeToolStream({
+        toolId: 'nonexistent-tool',
+        organizationId: DEV_ORG_ID,
+        userId: DEV_FOUNDER_ID,
+        clinicId: null,
+        rawContext: {},
+      });
+
+      await expect(async () => {
+        for await (const _ of generator) {
+          void _;
+        }
+      }).rejects.toThrow(BadRequestError);
     });
   });
 });

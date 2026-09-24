@@ -128,12 +128,29 @@ async function enhanceWithLlm(
   try {
     const prompt = buildLlmPrompt(prospect, latestAudit);
 
+    let systemPrompt: string | undefined;
+    let messages: Array<{ role: string; content: string }> | undefined;
+
+    // V3.1.13-B: If founder prompt context is available, use conversation history
+    if (execContext.founderPromptContext) {
+      systemPrompt = execContext.founderPromptContext.systemPrompt;
+      messages = execContext.founderPromptContext.messages.map((m) => ({
+        role: m.role,
+        content: m.content,
+      }));
+      // Append the tool-specific prompt as a final user message
+      messages.push({ role: 'user', content: prompt });
+    } else {
+      systemPrompt =
+        'You are a helpful assistant that drafts concise, professional outreach emails for a clinic growth system. Return ONLY valid JSON.';
+    }
+
     const response = await execContext.llmClient.generateCompletion({
       prompt,
-      systemPrompt:
-        'You are a helpful assistant that drafts concise, professional outreach emails for a clinic growth system. Return ONLY valid JSON.',
+      systemPrompt,
       maxTokens: 600,
       temperature: 0.4,
+      messages,
     });
 
     let parsed: unknown;

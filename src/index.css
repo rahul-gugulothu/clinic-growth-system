@@ -58,3 +58,31 @@
     -webkit-font-smoothing: antialiased;
   }
 }
+
+@layer components {
+  .typewriter-dots .dot-animate {
+    animation: typewriter-bounce 0.8s ease-in-out infinite both;
+  }
+  .typewriter-dots .dot-animate:nth-child(1) {
+    animation-delay: 0ms;
+  }
+  .typewriter-dots .dot-animate:nth-child(2) {
+    animation-delay: 200ms;
+  }
+  .typewriter-dots .dot-animate:nth-child(3) {
+    animation-delay: 400ms;
+  }
+}
+
+@keyframes typewriter-bounce {
+  0%,
+  80%,
+  100% {
+    transform: scale(0);
+    opacity: 0.4;
+  }
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}

@@ -1,30 +1,26 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
-import { Pool } from 'pg';
+import { Pool, type QueryResultRow } from 'pg';
 import request from 'supertest';
 import type { AuthContext } from '../src/types/index.js';
 import { createTestDatabase, type TestDatabase } from './helpers.js';
 import { setPool } from '../src/db/index.js';
 import { createApp } from '../src/app.js';
 import { signAccessToken } from '../src/utils/jwt.js';
-import type { ConversationMessageRecord, ConversationRecord } from '../src/types/founderMemory.js';
+import type { ConversationMessageRecord } from '../src/types/founderMemory.js';
+import {
+  getConversationContext,
+  buildFounderPromptContext,
+} from '../src/services/founderMemory.js';
 
 const DEV_ORG_ID = '00000000-0000-0000-0000-000000000001';
 const DEV_CLINIC_ID = '00000000-0000-0000-0000-000000000020';
 const DEV_FOUNDER_ID = '00000000-0000-0000-0000-000000000002';
 
 const ORG_B_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
-const USER_A_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeaaaa';
-const USER_B_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeebbbb';
+const USER_B_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee03';
 
 const founderAuth: AuthContext = {
   userId: DEV_FOUNDER_ID,
-  organizationId: DEV_ORG_ID,
-  role: 'founder',
-  clinicId: null,
-};
-
-const userAAuth: AuthContext = {
-  userId: USER_A_ID,
   organizationId: DEV_ORG_ID,
   role: 'founder',
   clinicId: null,
@@ -49,7 +45,6 @@ const authHeader = (token: string): { Authorization: string } => ({
 });
 
 const founderToken = signAccessToken(founderAuth);
-const userAToken = signAccessToken(userAAuth);
 const userBToken = signAccessToken(userBAuth);
 const orgBToken = signAccessToken(orgBFoundersAuth);
 
@@ -73,8 +68,8 @@ describe('V3.1.3-A Founder AI Conversation Memory', () => {
   let memPool: Pool;
   let app: ReturnType<typeof createApp>;
 
-  const query = (sql: string, params?: unknown[]) =>
-    params ? memPool.query(sql, params) : memPool.query(sql);
+  const query = <T extends QueryResultRow = QueryResultRow>(sql: string, params?: unknown[]) =>
+    params ? memPool.query<T>(sql, params) : memPool.query<T>(sql);
 
   beforeAll(async () => {
     tdb = createTestDatabase();
@@ -535,6 +530,538 @@ describe('V3.1.3-A Founder AI Conversation Memory', () => {
         [convId]
       );
       expect(after.rows[0].count).toBe(0);
+    });
+  });
+
+  // =====================================================================
+  // getConversationContext (V3.1.13-B)
+  // =====================================================================
+  describe('getConversationContext', () => {
+    const createConv = async () => {
+      const res = await request(app)
+        .post('/api/v1/founder/conversations')
+        .set(authHeader(founderToken))
+        .send({ title: 'Context Test' });
+      return res.body.conversation.id as string;
+    };
+
+    const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    it('returns messages ordered oldest→newest', async () => {
+      const convId = await createConv();
+
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'system', content: 'System msg' });
+      await delay(5);
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'user', content: 'User msg 1' });
+      await delay(5);
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'assistant', content: 'Assistant msg 1' });
+      await delay(5);
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'user', content: 'User msg 2' });
+
+      const messages = await getConversationContext(DEV_ORG_ID, DEV_FOUNDER_ID, convId);
+
+      expect(messages).toHaveLength(4);
+      expect(messages.map((m) => m.content)).toEqual([
+        'System msg',
+        'User msg 1',
+        'Assistant msg 1',
+        'User msg 2',
+      ]);
+    });
+
+    it('respects the limit parameter (returns most recent N)', async () => {
+      const convId = await createConv();
+
+      for (let i = 0; i < 15; i++) {
+        await request(app)
+          .post(`/api/v1/founder/conversations/${convId}/messages`)
+          .set(authHeader(founderToken))
+          .send({ role: 'user', content: `Message ${i}` });
+        await delay(2);
+      }
+
+      const messages = await getConversationContext(DEV_ORG_ID, DEV_FOUNDER_ID, convId, 5);
+
+      expect(messages).toHaveLength(5);
+      expect(messages[0]!.content).toBe('Message 10');
+      expect(messages[messages.length - 1]!.content).toBe('Message 14');
+    });
+
+    it('uses default limit of 12 when not specified', async () => {
+      const convId = await createConv();
+
+      for (let i = 0; i < 20; i++) {
+        await request(app)
+          .post(`/api/v1/founder/conversations/${convId}/messages`)
+          .set(authHeader(founderToken))
+          .send({ role: 'user', content: `msg ${i}` });
+        await delay(2);
+      }
+
+      const messages = await getConversationContext(DEV_ORG_ID, DEV_FOUNDER_ID, convId);
+
+      expect(messages).toHaveLength(12);
+      expect(messages[0]!.content).toBe('msg 8');
+      expect(messages[11]!.content).toBe('msg 19');
+    });
+
+    it('returns empty array for non-existent conversation', async () => {
+      const messages = await getConversationContext(
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        '00000000-0000-0000-0000-000000009999'
+      );
+      expect(messages).toEqual([]);
+    });
+
+    it('returns empty array when conversation belongs to another user', async () => {
+      const created = await request(app)
+        .post('/api/v1/founder/conversations')
+        .set(authHeader(founderToken))
+        .send({ title: 'User A conv' });
+      const convId = created.body.conversation.id as string;
+
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'user', content: 'private msg' });
+
+      const messages = await getConversationContext(DEV_ORG_ID, USER_B_ID, convId);
+      expect(messages).toEqual([]);
+    });
+
+    it('returns empty array when conversation belongs to another org', async () => {
+      const created = await request(app)
+        .post('/api/v1/founder/conversations')
+        .set(authHeader(orgBToken))
+        .send({ title: 'Org B conv' });
+      const convId = created.body.conversation.id as string;
+
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(orgBToken))
+        .send({ role: 'user', content: 'org b msg' });
+
+      const messages = await getConversationContext(DEV_ORG_ID, DEV_FOUNDER_ID, convId);
+      expect(messages).toEqual([]);
+    });
+
+    it('includes tool role messages in results', async () => {
+      const convId = await createConv();
+
+      const execRes = await query<{ id: string }>(
+        `INSERT INTO ai_tool_executions (organization_id, user_id, tool_id, success)
+         VALUES ($1, $2, 'priority-clinics', TRUE) RETURNING id`,
+        [DEV_ORG_ID, DEV_FOUNDER_ID]
+      );
+      const executionId = execRes.rows[0].id;
+
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({
+          role: 'tool',
+          content: 'Tool executed: priority-clinics',
+          tool_execution_id: executionId,
+          metadata: { tool_id: 'priority-clinics', execution_id: executionId },
+        });
+      await delay(5);
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'assistant', content: 'Here are the results' });
+
+      const messages = await getConversationContext(DEV_ORG_ID, DEV_FOUNDER_ID, convId);
+      expect(messages).toHaveLength(2);
+      expect(messages[0]!.role).toBe('tool');
+      expect(messages[1]!.role).toBe('assistant');
+    });
+
+    it('returns empty array for conversation with no messages', async () => {
+      const convId = await createConv();
+      const messages = await getConversationContext(DEV_ORG_ID, DEV_FOUNDER_ID, convId);
+      expect(messages).toEqual([]);
+    });
+
+    it('returns all messages when count is under limit', async () => {
+      const convId = await createConv();
+
+      for (let i = 0; i < 5; i++) {
+        await request(app)
+          .post(`/api/v1/founder/conversations/${convId}/messages`)
+          .set(authHeader(founderToken))
+          .send({ role: 'user', content: `msg ${i}` });
+        await delay(2);
+      }
+
+      const messages = await getConversationContext(DEV_ORG_ID, DEV_FOUNDER_ID, convId, 12);
+      expect(messages).toHaveLength(5);
+    });
+  });
+
+  // =====================================================================
+  // buildFounderPromptContext (V3.1.13-B)
+  // =====================================================================
+  describe('buildFounderPromptContext', () => {
+    const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    it('returns systemPrompt and messages with latest user message appended', async () => {
+      const created = await request(app)
+        .post('/api/v1/founder/conversations')
+        .set(authHeader(founderToken))
+        .send({ title: 'Prompt Context Test' });
+      const convId = created.body.conversation.id as string;
+
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'user', content: 'Previous question about clinics' });
+      await delay(5);
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'assistant', content: 'Previous answer' });
+      await delay(5);
+
+      const context = await buildFounderPromptContext(
+        convId,
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        'You are a helpful clinic growth assistant.',
+        'New question about priority'
+      );
+
+      expect(context.systemPrompt).toBe('You are a helpful clinic growth assistant.');
+      expect(context.messages).toHaveLength(3);
+      expect(context.messages[0]!.role).toBe('user');
+      expect(context.messages[0]!.content).toBe('Previous question about clinics');
+      expect(context.messages[1]!.role).toBe('assistant');
+      expect(context.messages[2]!.role).toBe('user');
+      expect(context.messages[2]!.content).toBe('New question about priority');
+    });
+
+    it('falls back to only the latest user message when no conversation exists', async () => {
+      const context = await buildFounderPromptContext(
+        '00000000-0000-0000-0000-000000009999',
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        'System prompt here',
+        'Just a new question'
+      );
+
+      expect(context.systemPrompt).toBe('System prompt here');
+      expect(context.messages).toHaveLength(1);
+      expect(context.messages[0]!.role).toBe('user');
+      expect(context.messages[0]!.content).toBe('Just a new question');
+    });
+
+    it('respects limit of 12 previous messages', async () => {
+      const created = await request(app)
+        .post('/api/v1/founder/conversations')
+        .set(authHeader(founderToken))
+        .send({ title: 'Limit Test' });
+      const convId = created.body.conversation.id as string;
+
+      for (let i = 0; i < 20; i++) {
+        await request(app)
+          .post(`/api/v1/founder/conversations/${convId}/messages`)
+          .set(authHeader(founderToken))
+          .send({ role: 'user', content: `msg ${i}` });
+        await delay(2);
+      }
+
+      const context = await buildFounderPromptContext(
+        convId,
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        'System',
+        'latest message'
+      );
+
+      expect(context.messages).toHaveLength(13);
+      expect(context.messages[0]!.content).toBe('msg 8');
+      expect(context.messages[12]!.content).toBe('latest message');
+    });
+
+    it('returns messages ordered oldest→newest with latest at end', async () => {
+      const created = await request(app)
+        .post('/api/v1/founder/conversations')
+        .set(authHeader(founderToken))
+        .send({ title: 'Order Test' });
+      const convId = created.body.conversation.id as string;
+
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'system', content: 'sys' });
+      await delay(5);
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'user', content: 'u1' });
+      await delay(5);
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'assistant', content: 'a1' });
+
+      const context = await buildFounderPromptContext(
+        convId,
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        'Sys prompt',
+        'u2'
+      );
+
+      expect(context.messages.map((m) => m.role)).toEqual([
+        'system',
+        'user',
+        'assistant',
+        'user',
+      ]);
+      expect(context.messages.map((m) => m.content)).toEqual([
+        'sys',
+        'u1',
+        'a1',
+        'u2',
+      ]);
+    });
+
+    it('returns latest message as role user with correct conversation_id', async () => {
+      const created = await request(app)
+        .post('/api/v1/founder/conversations')
+        .set(authHeader(founderToken))
+        .send({ title: 'Latest Msg Test' });
+      const convId = created.body.conversation.id as string;
+
+      const context = await buildFounderPromptContext(
+        convId,
+        DEV_ORG_ID,
+        DEV_FOUNDER_ID,
+        'System',
+        'my latest question'
+      );
+
+      const latest = context.messages[context.messages.length - 1];
+      expect(latest!.role).toBe('user');
+      expect(latest!.content).toBe('my latest question');
+      expect(latest!.conversation_id).toBe(convId);
+      expect(latest!.organization_id).toBe(DEV_ORG_ID);
+    });
+  });
+
+  // =====================================================================
+  // Auto-title Generation (V3.1.13-B)
+  // =====================================================================
+  describe('Auto-title Generation', () => {
+    const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    it('generates title from first user message', async () => {
+      const created = await request(app)
+        .post('/api/v1/founder/conversations')
+        .set(authHeader(founderToken))
+        .send({});
+      const convId = created.body.conversation.id as string;
+      expect(created.body.conversation.title).toBe('New Conversation');
+
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'user', content: 'How can I improve patient acquisition?' });
+      await delay(5);
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'assistant', content: 'Some advice' });
+
+      const detail = await request(app)
+        .get(`/api/v1/founder/conversations/${convId}`)
+        .set(authHeader(founderToken));
+
+      expect(detail.body.conversation.title).toBe('How can I improve patient acquisition');
+    });
+
+    it('generates title only once — second user message does not overwrite', async () => {
+      const created = await request(app)
+        .post('/api/v1/founder/conversations')
+        .set(authHeader(founderToken))
+        .send({});
+      const convId = created.body.conversation.id as string;
+
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'user', content: 'first message about clinics' });
+      await delay(5);
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'assistant', content: 'reply' });
+      await delay(5);
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'user', content: 'second message about growth' });
+
+      const detail = await request(app)
+        .get(`/api/v1/founder/conversations/${convId}`)
+        .set(authHeader(founderToken));
+
+      expect(detail.body.conversation.title).toBe('First message about clinics');
+    });
+
+    it('does not auto-title if conversation already has a custom title', async () => {
+      const created = await request(app)
+        .post('/api/v1/founder/conversations')
+        .set(authHeader(founderToken))
+        .send({ title: 'My Custom Title' });
+      const convId = created.body.conversation.id as string;
+
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'user', content: 'some message' });
+
+      const detail = await request(app)
+        .get(`/api/v1/founder/conversations/${convId}`)
+        .set(authHeader(founderToken));
+
+      expect(detail.body.conversation.title).toBe('My Custom Title');
+    });
+
+    it('trims whitespace before generating title', async () => {
+      const created = await request(app)
+        .post('/api/v1/founder/conversations')
+        .set(authHeader(founderToken))
+        .send({});
+      const convId = created.body.conversation.id as string;
+
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'user', content: '   What are my best prospects?   ' });
+
+      const detail = await request(app)
+        .get(`/api/v1/founder/conversations/${convId}`)
+        .set(authHeader(founderToken));
+
+      expect(detail.body.conversation.title).toBe('What are my best prospects');
+    });
+
+    it('truncates title to 60 characters', async () => {
+      const created = await request(app)
+        .post('/api/v1/founder/conversations')
+        .set(authHeader(founderToken))
+        .send({});
+      const convId = created.body.conversation.id as string;
+
+      const longContent = 'A very long message that definitely exceeds sixty characters in total length';
+
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'user', content: longContent });
+
+      const detail = await request(app)
+        .get(`/api/v1/founder/conversations/${convId}`)
+        .set(authHeader(founderToken));
+
+      expect(detail.body.conversation.title.length).toBeLessThanOrEqual(60);
+    });
+
+    it('capitalizes first letter (sentence case)', async () => {
+      const created = await request(app)
+        .post('/api/v1/founder/conversations')
+        .set(authHeader(founderToken))
+        .send({});
+      const convId = created.body.conversation.id as string;
+
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'user', content: 'how do I find priority clinics' });
+
+      const detail = await request(app)
+        .get(`/api/v1/founder/conversations/${convId}`)
+        .set(authHeader(founderToken));
+
+      expect(detail.body.conversation.title).toBe('How do I find priority clinics');
+    });
+
+    it('removes trailing punctuation from auto-title', async () => {
+      const created = await request(app)
+        .post('/api/v1/founder/conversations')
+        .set(authHeader(founderToken))
+        .send({});
+      const convId = created.body.conversation.id as string;
+
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'user', content: 'What is the best strategy?!' });
+
+      const detail = await request(app)
+        .get(`/api/v1/founder/conversations/${convId}`)
+        .set(authHeader(founderToken));
+
+      expect(detail.body.conversation.title).toBe('What is the best strategy');
+    });
+
+    it('does not auto-title from assistant or tool messages', async () => {
+      const created = await request(app)
+        .post('/api/v1/founder/conversations')
+        .set(authHeader(founderToken))
+        .send({});
+      const convId = created.body.conversation.id as string;
+
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'assistant', content: 'I can help with that!' });
+      await delay(5);
+      await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'user', content: 'Thanks' });
+
+      const detail = await request(app)
+        .get(`/api/v1/founder/conversations/${convId}`)
+        .set(authHeader(founderToken));
+
+      expect(detail.body.conversation.title).toBe('Thanks');
+    });
+
+    it('does not auto-title when first user message is empty after trim', async () => {
+      const created = await request(app)
+        .post('/api/v1/founder/conversations')
+        .set(authHeader(founderToken))
+        .send({});
+      const convId = created.body.conversation.id as string;
+
+      const res = await request(app)
+        .post(`/api/v1/founder/conversations/${convId}/messages`)
+        .set(authHeader(founderToken))
+        .send({ role: 'user', content: '   ' });
+
+      expect400(res);
+
+      const detail = await request(app)
+        .get(`/api/v1/founder/conversations/${convId}`)
+        .set(authHeader(founderToken));
+
+      expect(detail.body.conversation.title).toBe('New Conversation');
     });
   });
 });

@@ -1,9 +1,15 @@
+export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
+
+export type StreamingStatus = 'streaming' | 'complete' | 'cancelled' | 'error';
+
 export interface ChatMessage {
   id: string;
-  role: 'user' | 'assistant';
+  role: MessageRole;
   content: string;
   timestamp: Date;
   isLoading?: boolean;
+  isStreaming?: boolean;
+  streamingStatus?: StreamingStatus;
   toolResult?: AIToolResult;
 }
 
