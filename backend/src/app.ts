@@ -1,4 +1,4 @@
-﻿import express, { type Express } from 'express';
+import express, { type Express } from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import { requestLogger } from './middleware/requestLogger.js';
@@ -21,6 +21,7 @@ import messageRouter from './routes/messages.js';
 import aiToolsRouter from './routes/aiTools.js';
 import integrationsRouter from './routes/integrations.js';
 import founderMemoryRouter from './routes/founderMemory.js';
+import founderKnowledgeRouter from './routes/founderKnowledge.js';
 import { config } from './config/index.js';
 
 export const createApp = (): Express => {
@@ -63,6 +64,7 @@ export const createApp = (): Express => {
   app.use('/api/v1/ai', aiToolsRouter);
   app.use('/api/v1/integrations', integrationsRouter);
   app.use('/api/v1/founder/conversations', founderMemoryRouter);
+  app.use('/api/v1/founder-knowledge', founderKnowledgeRouter);
 
   app.use(errorHandler);
 

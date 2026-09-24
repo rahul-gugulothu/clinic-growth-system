@@ -81,7 +81,7 @@ const mockHeaders = (entries: Record<string, string | null>): MockHeaders => ({
   get: (name: string) => entries[name.toLowerCase()] ?? null,
 });
 
-const okResponse = (body: string | null = null, h: Record<string, string | null> = {}) => ({
+const _okResponse = (body: string | null = null, h: Record<string, string | null> = {}) => ({
   status: 200,
   ok: true,
   headers: mockHeaders({ ...h }),

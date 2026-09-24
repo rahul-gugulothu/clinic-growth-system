@@ -1,4 +1,4 @@
-﻿import { z } from 'zod';
+import { z } from 'zod';
 import { getClient } from '../db/index.js';
 import {
   BadRequestError,
@@ -339,7 +339,7 @@ export const executeTool = async (
      );
 
      const executionId = insertResult.rows[0].id;
-     const createdAt = insertResult.rows[0].created_at;
+     const createdAt = insertResult.rows[0].created_at as string;
 
      // 5. Move to 'running'
      await client.query(
@@ -591,7 +591,6 @@ export async function* executeToolStream(
   );
 
   const executionId = insertResult.rows[0].id;
-  const createdAt = insertResult.rows[0].created_at;
 
   // 6. Move to 'running'
   await client.query(
@@ -964,7 +963,7 @@ export const approveExecution = async (
     // V3.1.2-C3-B: bridge approved draft-email executions to the integration
     // event system. Only draft-email actions create a SendGrid email event;
     // other approvals leave the integration system untouched. Event creation
-    // uses its own client/transaction (see Â§7 atomicity limitation).
+    // uses its own client/transaction (see §7 atomicity limitation).
     if (record.tool_id === 'draft-email' && record.requires_human_review) {
       const payload = buildDraftEmailIntegrationPayload(record);
       await createIntegrationEvent({

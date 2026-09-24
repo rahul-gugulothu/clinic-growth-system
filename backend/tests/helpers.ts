@@ -16,6 +16,7 @@ export const MIGRATION_FILES = [
   '00005_v312_prospect_email.sql',
   '00006_v314_ai_execution_delivery_index.sql',
   '00007_v313_founder_conversation_memory.sql',
+  '00008_v314_knowledge_base.sql',
 ] as const;
 
 export interface TestDatabase {
