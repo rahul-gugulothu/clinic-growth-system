@@ -44,4 +44,4 @@ CREATE INDEX idx_knowledge_chunks_document_chunk_index ON knowledge_chunks(docum
 CREATE TRIGGER update_knowledge_documents_updated_at
     BEFORE UPDATE ON knowledge_documents
     FOR EACH ROW
-    EXECUTE FUNCTION update_updated_at_column();
+    EXECUTE FUNCTION trigger_set_updated_at();

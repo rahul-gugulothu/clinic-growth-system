@@ -26,4 +26,4 @@ CREATE INDEX idx_knowledge_chunk_embeddings_status ON knowledge_chunk_embeddings
 CREATE TRIGGER update_knowledge_chunk_embeddings_updated_at
     BEFORE UPDATE ON knowledge_chunk_embeddings
     FOR EACH ROW
-    EXECUTE FUNCTION update_updated_at_column();
+    EXECUTE FUNCTION trigger_set_updated_at();

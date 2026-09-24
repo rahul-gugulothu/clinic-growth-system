@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { config } from './config/index.js';
 import { createPool, closePool } from './db/index.js';
 import { logger } from './utils/logger.js';
